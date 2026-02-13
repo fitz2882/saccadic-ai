@@ -53,7 +53,7 @@ describe('MCPServer', () => {
       expect(response.result).toHaveProperty('tools');
 
       const result = response.result as { tools: unknown[] };
-      expect(result.tools).toHaveLength(8);
+      expect(result.tools).toHaveLength(9);
     });
 
     it('should have valid tool definitions with JSON Schema', async () => {

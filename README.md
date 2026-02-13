@@ -2,7 +2,7 @@
 
 **Visual feedback system for AI coding agents** — see, compare, and fix UI against design specs.
 
-Saccadic AI gives AI coding agents the ability to visually perceive what they build, compare it against design specifications, and receive actionable feedback to close the gap between design and implementation.
+Saccadic AI gives AI coding agents the ability to visually perceive what they build, compare it against design specifications, and receive actionable feedback to close the gap between design and implementation. It can orchestrate full design-to-code builds from `.pen` files with parallel page execution and iterative refinement.
 
 ## Benchmarks
 
@@ -24,12 +24,114 @@ npm run bench:detection
 Saccadic AI runs a multi-tier comparison pipeline:
 
 1. **Capture** a screenshot of your built page using a headless browser (Playwright)
-2. **Extract** DOM computed styles (colors, fonts, spacing, layout) from the live page
-3. **Load** design specs from Figma or a local design token file
-4. **Compare** DOM properties against the design (fast, precise)
-5. **Pixel diff** the screenshot against a reference image (catches visual regressions)
-6. **Generate feedback** with severity levels, affected elements, and CSS fix suggestions
-7. **Grade** the result from A (>95% match) to F (<50% match)
+2. **Extract** DOM computed styles (colors, fonts, spacing, layout, z-index, stacking context) from the live page
+3. **Load** design specs from Figma, Pencil.dev `.pen` files, or local design token files
+4. **Match** DOM elements to design nodes via a 5-pass matching pipeline (penId, structural fingerprint, IoU, text content, visual similarity)
+5. **Compare** DOM properties against the design with layout-aware suppression (flex positioning, cascade dedup)
+6. **Pixel diff** the screenshot against a reference image (catches visual regressions beyond DOM)
+7. **Generate feedback** with severity levels, affected elements, CSS fix suggestions with specificity context
+8. **Grade** the result from A (>95% match) to F (<50% match)
+
+## Building From a .pen Design File
+
+The fastest way to go from design to pixel-accurate code. Saccadic AI orchestrates the entire build — it analyzes the design, generates per-page build instructions, and iteratively refines each page until it matches the design at 95%+.
+
+### Prerequisites
+
+You need two MCP servers configured in your Claude Code settings:
+
+1. **Saccadic AI** — the visual comparison and build orchestration engine
+2. **Pencil MCP** — reads `.pen` design files and captures reference screenshots
+
+```json
+{
+  "mcpServers": {
+    "saccadic-ai": {
+      "command": "node",
+      "args": ["/path/to/saccadic-ai/dist/mcp/server.js"]
+    },
+    "pencil": {
+      "command": "npx",
+      "args": ["-y", "@anthropic/pencil-mcp"]
+    }
+  }
+}
+```
+
+No CLAUDE.md or special config is needed in the target project — everything the agent needs comes from the `plan_build` response.
+
+### Usage
+
+Open your build project directory in Claude Code and give this prompt:
+
+```
+Build all pages from the design at [path/to/design.pen]
+
+1. Call plan_build({ pencilFile: "[path/to/design.pen]" })
+2. Set up a dev server: npx serve ./build
+3. For each page in the plan, spawn a parallel sub-agent with that page's agentPrompt
+4. Each sub-agent should:
+   a. Capture a reference screenshot via Pencil MCP get_screenshot
+   b. Build the HTML/CSS with data-pen-id attributes matching the design node IDs
+   c. Call refine_build with the reference screenshot until status="pass" (95%+)
+5. Report final scores for all pages when done
+```
+
+### How It Works
+
+```
+You (prompt)                  Claude                          Saccadic MCP            Pencil MCP
+────────────                  ──────                          ────────────            ──────────
+"Build from design.pen" ───→  1. plan_build(pencilFile) ───→  Parses .pen file
+                                                         ←──  Returns per-page plans
+                                                               with agent prompts
+
+                              2. Spawns parallel sub-agents
+                                 (one per page, clean context)
+
+                              Sub-agent per page:
+                              ├─ 3. get_screenshot(frameId) ─────────────────────────→ Returns PNG
+                              │                              ←─────────────────────────
+                              ├─ 4. Builds HTML/CSS with data-pen-id attributes
+                              │
+                              ├─ 5. refine_build(buildUrl) ──→ Compares design vs build
+                              │                            ←── Score, mismatches, fixes
+                              ├─ 6. Applies fixes
+                              ├─ 7. refine_build(iteration=2)──→ Re-checks
+                              │                              ←── Improved score
+                              └─ 8. Repeats until status="pass" (≥95%)
+
+                              9. Collects results from all sub-agents
+                         ←──  10. Reports final per-page scores
+```
+
+**Key details:**
+
+- **`plan_build`** returns self-contained agent prompts for each page — includes the full design structure (node tree), design tokens, node IDs for `data-pen-id`, and pre-filled `refine_build` params
+- Each sub-agent runs in a **clean context** with only its page's design info — no cross-page pollution
+- **`refine_build`** tracks iteration history per page, detects stalls, suggests recovery strategies, and orders fixes by dependency (fixing a missing parent first resolves child mismatches)
+- Sub-agents capture a **reference screenshot** from Pencil MCP before building — this enables pixel-accurate comparison. Without it, saccadic generates an approximation from the design state
+
+### data-pen-id Attributes
+
+Every HTML element should have a `data-pen-id` attribute matching its design node ID. This is how saccadic matches DOM elements to design nodes:
+
+```html
+<div data-pen-id="heroSection">
+  <h1 data-pen-id="heroTitle">Welcome</h1>
+  <p data-pen-id="heroSubtitle">Build something amazing</p>
+</div>
+```
+
+Node IDs come from the `plan_build` response (`pages[].nodeIds`).
+
+### Tech Stack Options
+
+```
+plan_build({ pencilFile: "design.pen", techStack: "html" })    // default
+plan_build({ pencilFile: "design.pen", techStack: "react" })
+plan_build({ pencilFile: "design.pen", techStack: "nextjs" })
+```
 
 ## Quick Start
 
@@ -59,7 +161,44 @@ npm test
 
 ## Usage
 
-Saccadic AI can be used three ways: as a **CLI tool**, as an **MCP server** for AI agents, or as a **library** in your own code.
+Saccadic AI can be used four ways: as an **MCP server** for AI agents, as a **build orchestrator** for `.pen` designs, as a **CLI tool**, or as a **library**.
+
+---
+
+### MCP Server
+
+Saccadic AI includes a [Model Context Protocol](https://modelcontextprotocol.io/) server that AI agents (like Claude) can use directly. It communicates over stdio using JSON-RPC 2.0.
+
+```bash
+npm run mcp
+```
+
+Add to your MCP client config (e.g., Claude Code):
+
+```json
+{
+  "mcpServers": {
+    "saccadic-ai": {
+      "command": "node",
+      "args": ["path/to/saccadic-ai/dist/mcp/server.js"]
+    }
+  }
+}
+```
+
+**Available tools:**
+
+| Tool | Description |
+|------|-------------|
+| `plan_build` | Analyze a `.pen` file and generate a full build plan with per-page agent prompts |
+| `refine_build` | Iterative build refinement — call repeatedly until score reaches target |
+| `compare_design_build` | Full comparison pipeline with grading |
+| `capture_screenshot` | Capture a screenshot of any URL |
+| `load_design` | Parse a Figma file, `.pen` file, or token file |
+| `get_visual_diff` | Pixel diff overlay between two images |
+| `get_design_tokens` | Extract structured design tokens |
+| `compare_design_tokens` | Compare two token sets for breaking changes |
+| `evaluate_with_vlm` | Claude Vision qualitative assessment (requires `ANTHROPIC_API_KEY`) |
 
 ---
 
@@ -163,41 +302,6 @@ Or specify a custom size: `--viewport 1920x1080`
 
 ---
 
-### MCP Server
-
-Saccadic AI includes a [Model Context Protocol](https://modelcontextprotocol.io/) server that AI agents (like Claude) can use directly. It communicates over stdio using JSON-RPC 2.0.
-
-```bash
-npm run mcp
-```
-
-Add to your MCP client config (e.g., Claude Code):
-
-```json
-{
-  "mcpServers": {
-    "saccadic-ai": {
-      "command": "node",
-      "args": ["path/to/saccadic-ai/dist/mcp/server.js"]
-    }
-  }
-}
-```
-
-**Available tools:**
-
-| Tool | Description |
-|------|-------------|
-| `capture_screenshot` | Capture a screenshot of any URL |
-| `load_design` | Parse a Figma file or token file |
-| `compare_design_build` | Full comparison pipeline with grading |
-| `get_visual_diff` | Pixel diff overlay between two images |
-| `get_design_tokens` | Extract structured design tokens |
-| `compare_design_tokens` | Compare two token sets for breaking changes |
-| `evaluate_with_vlm` | Claude Vision qualitative assessment (requires `ANTHROPIC_API_KEY`) |
-
----
-
 ### Library
 
 Import Saccadic AI into your own Node.js project:
@@ -268,10 +372,11 @@ console.log(deltaE); // 3.2 (noticeable difference)
 src/
   core/
     types.ts              — Shared types, thresholds, viewport presets
-    screenshot-engine.ts  — Playwright screenshot + DOM extraction
+    screenshot-engine.ts  — Playwright screenshot + DOM extraction (z-index, layout context)
     design-parser.ts      — Figma API + W3C design token parsing
+    pencil-parser.ts      — Pencil.dev .pen file parser (5-phase pipeline)
     pixel-comparator.ts   — pixelmatch + CIEDE2000 color science
-    dom-comparator.ts     — IoU element matching + property comparison
+    dom-comparator.ts     — 5-pass element matching + property comparison
     comparison-engine.ts  — Orchestrator combining all modules
     feedback-generator.ts — Actionable feedback + cascade suppression
     virtual-canvas.ts     — rbush R-tree spatial indexing
@@ -279,38 +384,47 @@ src/
     vlm-comparator.ts     — Claude Vision qualitative assessment
     token-versioning.ts   — Design token diff engine
   mcp/
-    server.ts             — JSON-RPC 2.0 stdio MCP server (7 tools)
+    server.ts             — JSON-RPC 2.0 stdio MCP server (9 tools)
   integration/            — E2E integration tests
+  bench/                  — Benchmarking harness for A/B testing
   cli.ts                  — Commander CLI (compare, capture, tokens, tokens-diff, diff)
   index.ts                — Barrel export
 ```
 
-### 5-Tier Comparison Pipeline
+### DOM Element Matching (5-pass)
+
+1. **Pass 1: penId** — Exact match via `data-pen-id` attributes
+2. **Pass 1.5: Structural fingerprint** — Match by child count, types, aspect ratio, area (for components without penId)
+3. **Pass 2: IoU + text** — Intersection-over-Union spatial overlap with fuzzy text matching (Levenshtein)
+4. **Pass 3: Type + visual** — Tag type + fill color + bounds similarity
+5. **Pass 4: Name/ID fallback** — CSS selector name matching
+
+### Comparison Pipeline
 
 ```
-Design Spec (Figma / tokens)     Built Page (URL)
-         |                              |
-         v                              v
-   DesignParser               ScreenshotEngine
-   (design nodes)         (screenshot + DOM styles)
-         |                       |            |
-         +-------+-------+------+            |
-                 |       |                   |
-    Tier 1: DOMComparator |    Tier 2: PixelComparator
-          (property diff) |          (pixel diff)
-                 |        |                  |
-                 |   Tier 3: SSIMComparator  |
-                 |   (structural similarity) |
-                 |        |                  |
-                 |   Tier 4: VLMComparator   |
-                 |   (Claude Vision, opt.)   |
-                 |        |                  |
-                 v        v                  v
+Design Spec (Figma / .pen / tokens)     Built Page (URL)
+         |                                     |
+         v                                     v
+   DesignParser / PencilParser       ScreenshotEngine
+   (design nodes + tokens)       (screenshot + DOM styles)
+         |                              |            |
+         +-------+-------+-------------+            |
+                 |       |                           |
+    Tier 1: DOMComparator |         Tier 2: PixelComparator
+    (5-pass matching,     |         (selective regions,
+     layout-aware diff)   |          viewport-weighted)
+                 |        |                          |
+                 |   Tier 3: SSIMComparator           |
+                 |   (structural similarity)          |
+                 |        |                          |
+                 |   Tier 4: VLMComparator            |
+                 |   (Claude Vision, optional)        |
+                 |        |                          |
+                 v        v                          v
          Tier 5: FeedbackGenerator
-         (cascade suppression, grades, fixes)
+         (cascade suppression, dependency ordering,
+          CSS specificity fixes, grades)
 ```
-
-For full details, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ### Grading Scale
 
@@ -343,6 +457,30 @@ export FIGMA_ACCESS_TOKEN=your_token_here
 
 Generate a token at: **Figma > Settings > Personal Access Tokens**
 
+### Anthropic API Key
+
+For VLM (Claude Vision) evaluation and stall-breaking:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+Or set it in your MCP server config:
+
+```json
+{
+  "mcpServers": {
+    "saccadic-ai": {
+      "command": "node",
+      "args": ["path/to/saccadic-ai/dist/mcp/server.js"],
+      "env": {
+        "ANTHROPIC_API_KEY": "sk-ant-..."
+      }
+    }
+  }
+}
+```
+
 ### Design Token Files
 
 Saccadic AI supports the [W3C Design Token Community Group](https://design-tokens.github.io/community-group/format/) JSON format:
@@ -372,6 +510,7 @@ Saccadic AI supports the [W3C Design Token Community Group](https://design-token
 
 ```bash
 npm run dev          # Watch mode (rebuild on changes)
+npm test             # Run all 217 tests
 npm run test:watch   # Watch mode for tests
 npm run test:coverage # Coverage report
 npm run lint         # ESLint
@@ -392,6 +531,7 @@ Apache-2.0
 - [W3C Design Tokens](https://design-tokens.github.io/community-group/format/) — community group format for interoperable design tokens
 - [Figma REST API](https://www.figma.com/developers/api) — design file access and rendering
 - [Model Context Protocol](https://modelcontextprotocol.io/) — open standard for AI agent tool integration
+- [Pencil.dev](https://pencil.dev/) — design tool with `.pen` file format
 - [Commander.js](https://github.com/tj/commander.js/) — CLI framework
 - [Chalk](https://github.com/chalk/chalk) — terminal styling
 - [Vitest](https://vitest.dev/) — fast unit testing framework

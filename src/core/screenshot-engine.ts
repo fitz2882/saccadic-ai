@@ -137,18 +137,13 @@ export class ScreenshotEngine {
         'color','backgroundColor','fontSize','fontWeight','fontFamily',
         'lineHeight','letterSpacing','padding','margin','gap','borderRadius',
         'width','height','display','position','flexDirection','alignItems',
-        'justifyContent','border','boxShadow',
+        'justifyContent','border','boxShadow','zIndex',
       ];
-      elements.forEach((element, index) => {
+      // First pass: build selector map for parent lookup
+      var selectorMap = new Map();
+      elements.forEach((element) => {
         const rect = element.getBoundingClientRect();
         if (rect.width === 0 || rect.height === 0) return;
-        const computed = window.getComputedStyle(element);
-        const computedStyles = {};
-        properties.forEach((prop) => {
-          computedStyles[prop] = computed.getPropertyValue(
-            prop.replace(/[A-Z]/g, (m) => '-' + m.toLowerCase())
-          );
-        });
         const tagName = element.tagName.toLowerCase();
         const id = element.id ? '#' + element.id : '';
         const classes = element.className
@@ -163,6 +158,22 @@ export class ScreenshotEngine {
           }
         }
         const selector = id || (classes ? tagName + classes : tagName + ':nth-of-type(' + nthChild + ')');
+        selectorMap.set(element, selector);
+      });
+      // Second pass: extract styles with layout context
+      elements.forEach((element, index) => {
+        const rect = element.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) return;
+        const computed = window.getComputedStyle(element);
+        const computedStyles = {};
+        properties.forEach((prop) => {
+          computedStyles[prop] = computed.getPropertyValue(
+            prop.replace(/[A-Z]/g, (m) => '-' + m.toLowerCase())
+          );
+        });
+        const selector = selectorMap.get(element);
+        if (!selector) return;
+        const tagName = element.tagName.toLowerCase();
         const penId = element.getAttribute('data-pen-id') || undefined;
         var directText = '';
         for (var ci = 0; ci < element.childNodes.length; ci++) {
@@ -171,7 +182,50 @@ export class ScreenshotEngine {
           }
         }
         directText = directText.trim();
-        styles.push({ selector, tagName, bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, computedStyles, penId: penId, textContent: directText || undefined });
+        // Extract z-index and stacking context
+        var zIndex = computed.getPropertyValue('z-index');
+        var zIndexNum = zIndex === 'auto' ? undefined : parseInt(zIndex, 10);
+        if (zIndexNum !== undefined && isNaN(zIndexNum)) zIndexNum = undefined;
+        // Compute stacking layer (simplified: elements with explicit z-index or position != static)
+        var pos = computed.getPropertyValue('position');
+        var stackingLayer = 0;
+        if (pos !== 'static' && zIndexNum !== undefined) {
+          stackingLayer = zIndexNum;
+        } else if (pos !== 'static') {
+          stackingLayer = 1;
+        }
+        // Layout context
+        var display = computed.getPropertyValue('display');
+        var flexDir = computed.getPropertyValue('flex-direction');
+        var justifyContent = computed.getPropertyValue('justify-content');
+        var alignItems = computed.getPropertyValue('align-items');
+        var layoutContext = { display: display, position: pos };
+        if (display === 'flex' || display === 'inline-flex') {
+          layoutContext.flexDirection = flexDir;
+          layoutContext.justifyContent = justifyContent;
+          layoutContext.alignItems = alignItems;
+        }
+        // Parent layout context
+        var parent = element.parentElement;
+        if (parent) {
+          var parentSel = selectorMap.get(parent);
+          if (parentSel) {
+            var parentComputed = window.getComputedStyle(parent);
+            var parentDisplay = parentComputed.getPropertyValue('display');
+            layoutContext.parentSelector = parentSel;
+            if (parentDisplay === 'flex' || parentDisplay === 'inline-flex') {
+              layoutContext.parentLayout = {
+                display: parentDisplay,
+                flexDirection: parentComputed.getPropertyValue('flex-direction'),
+                justifyContent: parentComputed.getPropertyValue('justify-content'),
+                alignItems: parentComputed.getPropertyValue('align-items'),
+              };
+            } else {
+              layoutContext.parentLayout = { display: parentDisplay };
+            }
+          }
+        }
+        styles.push({ selector, tagName, bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, computedStyles, penId: penId, textContent: directText || undefined, zIndex: zIndexNum, stackingLayer: stackingLayer, layoutContext: layoutContext });
       });
       return styles;
     `) as () => DOMElementStyle[];

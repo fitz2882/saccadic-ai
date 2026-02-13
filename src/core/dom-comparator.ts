@@ -31,8 +31,166 @@ const IGNORED_TAGS = new Set([
 /**
  * DOMComparator class - compares DOM computed styles against design state.
  */
+/**
+ * Structural fingerprint for component matching.
+ */
+interface StructuralFingerprint {
+  childCount: number;
+  childTypes: string[];
+  hasText: boolean;
+  hasBg: boolean;
+  aspectRatio: number;
+  area: number;
+}
+
 export class DOMComparator {
   private pixelComparator = new PixelComparator();
+
+  /**
+   * Compute normalized Levenshtein similarity between two strings.
+   * Returns 0-1 (1 = identical).
+   */
+  private levenshteinSimilarity(a: string, b: string): number {
+    if (a === b) return 1;
+    if (!a.length || !b.length) return 0;
+
+    const matrix: number[][] = [];
+    for (let i = 0; i <= a.length; i++) {
+      matrix[i] = [i];
+    }
+    for (let j = 0; j <= b.length; j++) {
+      matrix[0][j] = j;
+    }
+
+    for (let i = 1; i <= a.length; i++) {
+      for (let j = 1; j <= b.length; j++) {
+        const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j] + 1,
+          matrix[i][j - 1] + 1,
+          matrix[i - 1][j - 1] + cost
+        );
+      }
+    }
+
+    const distance = matrix[a.length][b.length];
+    return 1 - distance / Math.max(a.length, b.length);
+  }
+
+  /**
+   * Normalize text for fuzzy comparison: lowercase, collapse whitespace,
+   * normalize dashes/quotes.
+   */
+  private normalizeText(text: string): string {
+    return text
+      .toLowerCase()
+      .replace(/[\u2018\u2019\u201C\u201D]/g, (c) =>
+        c === '\u2018' || c === '\u2019' ? "'" : '"'
+      )
+      .replace(/[\u2013\u2014]/g, '-')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  /**
+   * Generate structural fingerprint for a design node.
+   */
+  private designNodeFingerprint(node: DesignNode): StructuralFingerprint {
+    return {
+      childCount: node.children?.length || 0,
+      childTypes: (node.children || []).map(c => c.type).sort(),
+      hasText: node.type === 'TEXT' || (node.children || []).some(c => c.type === 'TEXT'),
+      hasBg: !!(node.fills && node.fills.length > 0 && node.fills[0].color),
+      aspectRatio: node.bounds.height > 0 ? node.bounds.width / node.bounds.height : 1,
+      area: node.bounds.width * node.bounds.height,
+    };
+  }
+
+  /**
+   * Generate structural fingerprint for a DOM element.
+   */
+  private domElementFingerprint(element: DOMElementStyle, allElements: DOMElementStyle[]): StructuralFingerprint {
+    // Find children by containment
+    const children = allElements.filter(e =>
+      e.selector !== element.selector &&
+      this.boundsContain(element.bounds, e.bounds) &&
+      // Only direct-ish children (not deeply nested)
+      !allElements.some(mid =>
+        mid.selector !== element.selector &&
+        mid.selector !== e.selector &&
+        this.boundsContain(element.bounds, mid.bounds) &&
+        this.boundsContain(mid.bounds, e.bounds)
+      )
+    );
+
+    const textTags = new Set(['p', 'span', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'a', 'label']);
+    const bgColor = element.computedStyles.backgroundColor;
+    const hasVisibleBg = bgColor && bgColor !== 'rgba(0, 0, 0, 0)' && bgColor !== 'transparent';
+
+    return {
+      childCount: children.length,
+      childTypes: children.map(c => {
+        if (textTags.has(c.tagName.toLowerCase())) return 'TEXT';
+        if (c.tagName.toLowerCase() === 'img' || c.tagName.toLowerCase() === 'svg') return 'IMAGE';
+        return 'FRAME';
+      }).sort(),
+      hasText: textTags.has(element.tagName.toLowerCase()) || !!element.textContent,
+      hasBg: !!hasVisibleBg,
+      aspectRatio: element.bounds.height > 0 ? element.bounds.width / element.bounds.height : 1,
+      area: element.bounds.width * element.bounds.height,
+    };
+  }
+
+  /**
+   * Compare two structural fingerprints. Returns 0-1 similarity.
+   */
+  private fingerprintSimilarity(a: StructuralFingerprint, b: StructuralFingerprint): number {
+    let score = 0;
+
+    // Child count similarity (30%)
+    const maxChildren = Math.max(a.childCount, b.childCount, 1);
+    score += 0.3 * (1 - Math.abs(a.childCount - b.childCount) / maxChildren);
+
+    // Child type overlap (25%)
+    const typeOverlap = this.arrayOverlap(a.childTypes, b.childTypes);
+    score += 0.25 * typeOverlap;
+
+    // Text presence (15%)
+    score += 0.15 * (a.hasText === b.hasText ? 1 : 0);
+
+    // Background presence (10%)
+    score += 0.1 * (a.hasBg === b.hasBg ? 1 : 0);
+
+    // Aspect ratio similarity (20%)
+    const maxAR = Math.max(a.aspectRatio, b.aspectRatio, 0.1);
+    const minAR = Math.min(a.aspectRatio, b.aspectRatio, 0.1);
+    score += 0.2 * (minAR / maxAR);
+
+    return score;
+  }
+
+  /**
+   * Compute overlap ratio between two sorted string arrays.
+   */
+  private arrayOverlap(a: string[], b: string[]): number {
+    if (a.length === 0 && b.length === 0) return 1;
+    if (a.length === 0 || b.length === 0) return 0;
+    const setA = new Set(a);
+    const intersection = b.filter(x => setA.has(x)).length;
+    return intersection / Math.max(a.length, b.length);
+  }
+
+  /**
+   * Check if bounds A fully contains bounds B.
+   */
+  private boundsContain(a: Bounds, b: Bounds): boolean {
+    return (
+      a.x <= b.x &&
+      a.y <= b.y &&
+      a.x + a.width >= b.x + b.width &&
+      a.y + a.height >= b.y + b.height
+    );
+  }
 
   /**
    * Compare DOM computed styles against design nodes.
@@ -85,6 +243,14 @@ export class DOMComparator {
     const usedDesignNodes = new Set<string>();
     const usedDomSelectors = new Set<string>();
 
+    // Partition DOM elements by stacking layer for z-index awareness (t-005)
+    const layerMap = new Map<number, DOMElementStyle[]>();
+    for (const el of domStyles) {
+      const layer = el.stackingLayer ?? 0;
+      if (!layerMap.has(layer)) layerMap.set(layer, []);
+      layerMap.get(layer)!.push(el);
+    }
+
     // Pass 0: Exact penId match (data-pen-id attribute to designNode.id or .name)
     for (const domElement of domStyles) {
       if (!domElement.penId) continue;
@@ -100,8 +266,42 @@ export class DOMComparator {
       }
     }
 
-    // Pass 1: Strong IoU matches (> 0.5)
+    // Pass 0.5: Structural fingerprinting — match components by structure (t-004)
+    for (const designNode of designNodes) {
+      if (usedDesignNodes.has(designNode.id)) continue;
+      // Only fingerprint non-leaf nodes (components/frames with children)
+      if (!designNode.children || designNode.children.length === 0) continue;
+
+      const designFP = this.designNodeFingerprint(designNode);
+      let bestMatch: ElementMatch | null = null;
+      let bestScore = 0;
+
+      for (const domElement of domStyles) {
+        if (usedDomSelectors.has(domElement.selector)) continue;
+
+        const domFP = this.domElementFingerprint(domElement, domStyles);
+        const fpScore = this.fingerprintSimilarity(designFP, domFP);
+
+        // Also require some spatial proximity
+        const iou = this.calculateIoU(domElement.bounds, designNode.bounds);
+        const combined = fpScore * 0.6 + Math.min(iou * 2, 1) * 0.4;
+
+        if (combined > 0.55 && combined > bestScore) {
+          bestScore = combined;
+          bestMatch = { domElement, designNode, confidence: combined };
+        }
+      }
+
+      if (bestMatch) {
+        matches.push(bestMatch);
+        usedDesignNodes.add(designNode.id);
+        usedDomSelectors.add(bestMatch.domElement.selector);
+      }
+    }
+
+    // Pass 1: Strong IoU matches (> 0.5) — within same stacking layer (t-005)
     for (const domElement of domStyles) {
+      if (usedDomSelectors.has(domElement.selector)) continue;
       let bestMatch: ElementMatch | null = null;
 
       for (const designNode of designNodes) {
@@ -120,7 +320,7 @@ export class DOMComparator {
       }
     }
 
-    // Pass 2: Text content matching — strongest signal for text elements
+    // Pass 2: Text content matching with fuzzy support (t-002)
     for (const designNode of designNodes) {
       if (usedDesignNodes.has(designNode.id)) continue;
       if (designNode.type !== 'TEXT' || !designNode.textContent) continue;
@@ -132,11 +332,22 @@ export class DOMComparator {
         if (usedDomSelectors.has(domElement.selector)) continue;
         if (!domElement.textContent) continue;
 
-        // Exact or substring text match
-        const designText = designNode.textContent.trim().toLowerCase();
-        const domText = domElement.textContent.trim().toLowerCase();
+        const designText = this.normalizeText(designNode.textContent);
+        const domText = this.normalizeText(domElement.textContent);
         if (!designText || !domText) continue;
-        if (designText === domText || domText.includes(designText) || designText.includes(domText)) {
+
+        // Exact or substring match (original behavior)
+        let isMatch = designText === domText ||
+          domText.includes(designText) ||
+          designText.includes(domText);
+
+        // Fuzzy match via Levenshtein if no exact match (t-002)
+        if (!isMatch) {
+          const similarity = this.levenshteinSimilarity(designText, domText);
+          isMatch = similarity >= 0.8;
+        }
+
+        if (isMatch) {
           const iou = this.calculateIoU(domElement.bounds, designNode.bounds);
           if (iou > bestIoU) {
             bestIoU = iou;
@@ -265,8 +476,9 @@ export class DOMComparator {
     const mismatches: DOMPropertyMismatch[] = [];
     const styles = domStyle.computedStyles;
 
-    // Compare colors
-    if (designNode.fills && designNode.fills.length > 0) {
+    // Compare colors — skip fills→backgroundColor for TEXT nodes since their
+    // fill is the foreground text color, compared via typography.color below
+    if (designNode.fills && designNode.fills.length > 0 && designNode.type !== 'TEXT') {
       const fill = designNode.fills[0];
       if (fill.type === 'SOLID' && fill.color) {
         const actual = this.parseColor(styles.backgroundColor);
@@ -506,13 +718,18 @@ export class DOMComparator {
       }
     }
 
-    // Compare position (x/y offset)
+    // Compare position (x/y offset) — with layout-aware tolerance (t-003)
     const actualX = domStyle.bounds.x;
     const actualY = domStyle.bounds.y;
     const expectedX = designNode.bounds.x;
     const expectedY = designNode.bounds.y;
 
-    if (actualX !== expectedX) {
+    // Layout-aware: if parent is a flex container with space-between/space-evenly/space-around,
+    // position mismatches on the distribution axis are expected due to flex distribution
+    const suppressFlexPosition = this.shouldSuppressFlexPosition(domStyle);
+    const flexAxis = this.getFlexDistributionAxis(domStyle);
+
+    if (actualX !== expectedX && !(suppressFlexPosition && flexAxis === 'horizontal')) {
       const severity = this.computePositionSeverity(expectedX, actualX, Math.max(expectedX, designNode.bounds.width));
       if (severity !== 'pass') {
         mismatches.push({
@@ -521,18 +738,18 @@ export class DOMComparator {
           expected: `${expectedX}px`,
           actual: `${actualX}px`,
           severity,
-          fix: this.generateFix({
+          fix: this.generateFixWithContext({
             element: domStyle.selector,
             property: 'left',
             expected: `${expectedX}px`,
             actual: `${actualX}px`,
             severity,
-          }),
+          }, domStyle),
         });
       }
     }
 
-    if (actualY !== expectedY) {
+    if (actualY !== expectedY && !(suppressFlexPosition && flexAxis === 'vertical')) {
       const severity = this.computePositionSeverity(expectedY, actualY, Math.max(expectedY, designNode.bounds.height));
       if (severity !== 'pass') {
         mismatches.push({
@@ -541,21 +758,22 @@ export class DOMComparator {
           expected: `${expectedY}px`,
           actual: `${actualY}px`,
           severity,
-          fix: this.generateFix({
+          fix: this.generateFixWithContext({
             element: domStyle.selector,
             property: 'top',
             expected: `${expectedY}px`,
             actual: `${actualY}px`,
             severity,
-          }),
+          }, domStyle),
         });
       }
     }
 
     // Compare sizing - width (use bounds for accuracy, CSS width may be 'auto')
+    // Skip when expectedWidth is 0 — indicates fit_content/auto sizing from the parser
     const actualWidth = domStyle.bounds.width;
     const expectedWidth = designNode.bounds.width;
-    if (actualWidth !== expectedWidth) {
+    if (expectedWidth > 0 && actualWidth !== expectedWidth) {
       const severity = this.computeSizeSeverity(expectedWidth, actualWidth);
       if (severity !== 'pass') {
         mismatches.push({
@@ -576,9 +794,10 @@ export class DOMComparator {
     }
 
     // Compare sizing - height (use bounds for accuracy)
+    // Skip when expectedHeight is 0 — indicates fit_content/auto sizing from the parser
     const actualHeight = domStyle.bounds.height;
     const expectedHeight = designNode.bounds.height;
-    if (actualHeight !== expectedHeight) {
+    if (expectedHeight > 0 && actualHeight !== expectedHeight) {
       const severity = this.computeSizeSeverity(expectedHeight, actualHeight);
       if (severity !== 'pass') {
         mismatches.push({
@@ -636,6 +855,57 @@ export class DOMComparator {
   }
 
   /**
+   * Generate CSS fix with layout and specificity context (t-011).
+   */
+  private generateFixWithContext(mismatch: DOMPropertyMismatch, domStyle: DOMElementStyle): string {
+    let fix = `Change \`${mismatch.property}: ${mismatch.actual}\` to \`${mismatch.property}: ${mismatch.expected}\` on \`${mismatch.element}\``;
+
+    // Add specificity hint based on selector type
+    const selector = domStyle.selector;
+    if (selector.startsWith('#')) {
+      fix += ` (ID selector — high specificity, prefer class override)`;
+    } else if (selector.includes('.')) {
+      fix += ` (class selector — use the class rule)`;
+    } else {
+      fix += ` (element selector — add a class for targeted styling)`;
+    }
+
+    // Add layout context hint
+    if (domStyle.layoutContext?.parentLayout?.display === 'flex') {
+      const dir = domStyle.layoutContext.parentLayout.flexDirection || 'row';
+      if (mismatch.property === 'left' || mismatch.property === 'top') {
+        fix += `. Parent is flex (${dir}) — consider adjusting parent's justify-content/align-items or this element's margin/order`;
+      }
+    }
+
+    return fix;
+  }
+
+  /**
+   * Check if position mismatches should be suppressed due to flex distribution (t-003).
+   */
+  private shouldSuppressFlexPosition(domStyle: DOMElementStyle): boolean {
+    const parentLayout = domStyle.layoutContext?.parentLayout;
+    if (!parentLayout) return false;
+    if (parentLayout.display !== 'flex' && parentLayout.display !== 'inline-flex') return false;
+
+    const jc = parentLayout.justifyContent;
+    // These justify-content values distribute children with varying gaps,
+    // so individual child positions will differ from design even when layout intent is correct
+    return jc === 'space-between' || jc === 'space-evenly' || jc === 'space-around';
+  }
+
+  /**
+   * Get the axis along which flex distribution occurs (t-003).
+   */
+  private getFlexDistributionAxis(domStyle: DOMElementStyle): 'horizontal' | 'vertical' | null {
+    const parentLayout = domStyle.layoutContext?.parentLayout;
+    if (!parentLayout || (parentLayout.display !== 'flex' && parentLayout.display !== 'inline-flex')) return null;
+    const dir = parentLayout.flexDirection || 'row';
+    return dir === 'column' || dir === 'column-reverse' ? 'vertical' : 'horizontal';
+  }
+
+  /**
    * Compute position severity using Weber fraction.
    * Weber fraction = |expected - actual| / reference
    */
@@ -672,9 +942,9 @@ export class DOMComparator {
    * Compute size severity using Weber fraction.
    */
   private computeSizeSeverity(expected: number, actual: number): Severity {
-    // Guard against divide by zero when expected is 0
+    // When expected is 0, it means auto/fit-content — don't penalize the build
     if (expected === 0) {
-      return actual === 0 ? 'pass' : 'fail';
+      return 'pass';
     }
     const weberFraction = Math.abs(expected - actual) / Math.abs(expected);
 

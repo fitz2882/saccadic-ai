@@ -164,6 +164,24 @@ export interface DOMElementStyle {
   computedStyles: Record<string, string>;
   penId?: string;
   textContent?: string;
+  zIndex?: number;
+  stackingLayer?: number;
+  layoutContext?: LayoutContext;
+}
+
+export interface LayoutContext {
+  display: string;
+  position: string;
+  flexDirection?: string;
+  justifyContent?: string;
+  alignItems?: string;
+  parentSelector?: string;
+  parentLayout?: {
+    display: string;
+    flexDirection?: string;
+    justifyContent?: string;
+    alignItems?: string;
+  };
 }
 
 export interface ElementBounds {
@@ -343,6 +361,7 @@ export interface RefineBuildParams {
   buildUrl: string;
   referenceImage?: string;
   targetGrade?: 'A' | 'B' | 'C';
+  targetScore?: number;
   viewport?: string | Viewport;
   selector?: string;
   iteration?: number;
@@ -372,6 +391,15 @@ export interface EvaluateWithVLMParams {
   designImage: string; // base64 or file path
   buildImage: string;  // base64 or file path
   prompt?: string;
+}
+
+export interface PlanBuildParams {
+  pencilFile: string;
+  pencilTheme?: string;
+  buildDir?: string;
+  techStack?: string;
+  targetScore?: number;
+  maxIterationsPerPage?: number;
 }
 
 // ── Thresholds ──

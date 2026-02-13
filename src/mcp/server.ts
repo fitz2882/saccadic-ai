@@ -27,6 +27,7 @@ import type {
   GetDesignTokensParams,
   CompareDesignTokensParams,
   EvaluateWithVLMParams,
+  PlanBuildParams,
   DesignTokens,
   Viewport,
 } from '../core/types.js';
@@ -293,9 +294,10 @@ const TOOLS = [
   {
     name: 'refine_build',
     description:
-      'Iterative build refinement tool. Compares a build against a design and returns prioritized, actionable fixes. ' +
-      'Call repeatedly after applying fixes until status is "pass". ' +
-      'Each call should target a single page/frame. Clear your build context between pages for best results.',
+      'Iterative build refinement tool with multi-page orchestration. Compares a build against a design and returns ' +
+      'detailed mismatches with actionable fixes. Call repeatedly after applying fixes until status is "pass". ' +
+      'Tracks iteration history per page, detects stalls, and auto-discovers all frames in .pen files. ' +
+      'When a page passes (≥95%), returns the next page to work on. Target: 95% (Grade A).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -310,7 +312,7 @@ const TOOLS = [
             pencilFrame: { type: 'string' },
             pencilTheme: { type: 'string' },
           },
-          description: 'Design source parameters',
+          description: 'Design source parameters. If pencilFile is provided without pencilFrame, all frames are auto-discovered.',
         },
         buildUrl: {
           type: 'string',
@@ -320,10 +322,16 @@ const TOOLS = [
           type: 'string',
           description: 'Design screenshot (base64 data URI, file path, or URL). Use Pencil MCP get_screenshot for .pen designs.',
         },
+        targetScore: {
+          type: 'number',
+          minimum: 0,
+          maximum: 1,
+          description: 'Target match score (0-1) before status becomes "pass" (default: 0.95)',
+        },
         targetGrade: {
           type: 'string',
           enum: ['A', 'B', 'C'],
-          description: 'Target grade to reach before status becomes "pass" (default: B)',
+          description: 'Target grade (default: A). Overridden by targetScore if both provided.',
         },
         viewport: {
           oneOf: [
@@ -355,7 +363,78 @@ const TOOLS = [
       required: ['designSource', 'buildUrl'],
     },
   },
+  {
+    name: 'plan_build',
+    description:
+      'Analyze a .pen design file and generate a complete build orchestration plan with per-page agent prompts. ' +
+      'Returns everything needed to build all pages in parallel: design structure, tokens, node IDs, ' +
+      'ready-to-use agent prompts, and an orchestration prompt for spawning parallel sub-agents.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pencilFile: {
+          type: 'string',
+          description: 'Path to .pen design file',
+        },
+        pencilTheme: {
+          type: 'string',
+          description: 'Theme mode (e.g., "Light", "Dark")',
+        },
+        buildDir: {
+          type: 'string',
+          description: 'Build output directory (default: ./build)',
+        },
+        techStack: {
+          type: 'string',
+          enum: ['html', 'react', 'nextjs'],
+          description: 'Tech stack for generated code (default: html)',
+        },
+        targetScore: {
+          type: 'number',
+          minimum: 0,
+          maximum: 1,
+          description: 'Target match score 0-1 (default: 0.95)',
+        },
+        maxIterationsPerPage: {
+          type: 'number',
+          description: 'Max refine iterations per page (default: 10)',
+        },
+      },
+      required: ['pencilFile'],
+    },
+  },
 ];
+
+// ── Refine Session State ──
+
+interface RefinePageStatus {
+  name: string;
+  status: 'pending' | 'iterating' | 'passed';
+  score: number;
+  iterations: number;
+}
+
+interface RefineIterationRecord {
+  iteration: number;
+  score: number;
+  grade: string;
+  failCount: number;
+  warnCount: number;
+}
+
+interface RefineDOMSnapshot {
+  styleHashes: Map<string, string>;
+  domStyles: Array<{ selector: string; bounds: { x: number; y: number; width: number; height: number } }>;
+}
+
+interface RefineSession {
+  pencilFile: string;
+  pages: RefinePageStatus[];
+  currentFrame: string | null;
+  history: RefineIterationRecord[];
+  previousSnapshot?: RefineDOMSnapshot;
+  changedElements?: Set<string>;
+}
 
 // ── MCP Server ──
 
@@ -364,6 +443,7 @@ class MCPServer {
   private screenshotEngine: ScreenshotEngine | null = null;
   private designParser: DesignParser | null = null;
   private pixelComparator: PixelComparator | null = null;
+  private refineSessions = new Map<string, RefineSession>();
 
   private getEngine(): ComparisonEngine {
     if (!this.engine) {
@@ -506,6 +586,9 @@ class MCPServer {
 
       case 'refine_build':
         return await this.refineBuild(args as RefineBuildParams);
+
+      case 'plan_build':
+        return await this.planBuild(args as PlanBuildParams);
 
       default:
         throw {
@@ -949,113 +1032,388 @@ class MCPServer {
     };
   }
 
+  /**
+   * Get or create a refine session for a .pen file.
+   */
+  private async getOrCreateSession(pencilFile: string): Promise<RefineSession> {
+    const existing = this.refineSessions.get(pencilFile);
+    if (existing) return existing;
+
+    // Discover frames from the .pen file
+    const fs = await import('fs/promises');
+    const content = await fs.readFile(pencilFile, 'utf-8');
+    const parser = new PencilParser();
+    const frames = parser.listFrames(JSON.parse(content));
+
+    const session: RefineSession = {
+      pencilFile,
+      pages: frames.map(f => ({
+        name: f.name,
+        status: 'pending' as const,
+        score: 0,
+        iterations: 0,
+      })),
+      currentFrame: null,
+      history: [],
+    };
+
+    this.refineSessions.set(pencilFile, session);
+    return session;
+  }
+
   private async refineBuild(params: RefineBuildParams) {
-    const targetGrade = params.targetGrade || 'B';
+    // Resolve target score: targetScore takes precedence over targetGrade
+    const gradeThresholds: Record<string, number> = { A: 0.95, B: 0.85, C: 0.7 };
+    const targetScore = params.targetScore ?? gradeThresholds[params.targetGrade || 'A'] ?? 0.95;
     const iteration = params.iteration || 1;
     const maxIterations = params.maxIterations || 10;
 
-    const gradeThresholds: Record<string, number> = { A: 0.95, B: 0.85, C: 0.7 };
-    const targetThreshold = gradeThresholds[targetGrade] || 0.85;
+    // Session management for .pen files
+    let session: RefineSession | null = null;
+    const pencilFile = params.designSource.pencilFile;
+    const currentFrame = params.designSource.pencilFrame;
 
-    // Delegate to compareDesignBuild for the actual comparison
+    if (pencilFile) {
+      session = await this.getOrCreateSession(pencilFile);
+
+      // If frame changed, clear iteration history
+      if (currentFrame && currentFrame !== session.currentFrame) {
+        session.history = [];
+        session.currentFrame = currentFrame;
+
+        // Mark the new frame as iterating
+        const page = session.pages.find(p => p.name === currentFrame);
+        if (page) page.status = 'iterating';
+      }
+    }
+
+    // Run the actual comparison
     const compareResult = await this.compareDesignBuild({
       designSource: params.designSource,
       buildUrl: params.buildUrl,
       viewport: params.viewport,
       selector: params.selector,
-      threshold: targetThreshold,
+      threshold: targetScore,
       referenceImage: params.referenceImage,
     });
 
-    // Parse the comparison result from the JSON content
+    // Parse the comparison result
     const resultJson = JSON.parse(
       (compareResult.content[0] as { type: string; text: string }).text
     );
 
     const currentGrade = resultJson.overall.grade as string;
-    const matchPct = Math.round(resultJson.overall.matchPercentage * 100);
-    const gradeOrder = ['F', 'D', 'C', 'B', 'A'];
-    const meetsTarget = gradeOrder.indexOf(currentGrade) >= gradeOrder.indexOf(targetGrade);
-    const hitMaxIterations = iteration >= maxIterations;
+    const matchPercentage = resultJson.overall.matchPercentage as number;
+    const matchPct = Math.round(matchPercentage * 100);
 
-    // Determine status
-    let status: 'pass' | 'iterate' | 'max_iterations';
-    if (meetsTarget) {
-      status = 'pass';
-    } else if (hitMaxIterations) {
-      status = 'max_iterations';
-    } else {
-      status = 'iterate';
-    }
-
-    // Prioritize fixes: group by element, fail before warn, limit to top issues
+    // Extract full mismatch details from feedback
     const feedback = resultJson.feedback as Array<{
       severity: string;
       category: string;
       message: string;
       element?: string;
       fix?: string;
+      property?: string;
+      expected?: string;
+      actual?: string;
     }>;
 
     const fails = feedback.filter(f => f.severity === 'fail');
     const warns = feedback.filter(f => f.severity === 'warn');
 
-    // Group fails by category for concise output
-    const failsByCategory: Record<string, typeof fails> = {};
-    for (const f of fails) {
-      (failsByCategory[f.category] ??= []).push(f);
+    // Track iteration in session
+    if (session) {
+      session.history.push({
+        iteration,
+        score: matchPercentage,
+        grade: currentGrade,
+        failCount: fails.length,
+        warnCount: warns.length,
+      });
+
+      // Update page status
+      if (currentFrame) {
+        const page = session.pages.find(p => p.name === currentFrame);
+        if (page) {
+          page.score = matchPercentage;
+          page.iterations = iteration;
+        }
+      }
     }
 
-    // Build prioritized fix list (top 10 most impactful)
-    const prioritizedFixes: Array<{ priority: number; element?: string; issue: string; fix?: string }> = [];
+    // Stall detection: score hasn't improved in last 2 iterations
+    let stalled = false;
+    if (session && session.history.length >= 3) {
+      const recent = session.history.slice(-3);
+      const scoreImprovement = recent[recent.length - 1].score - recent[0].score;
+      stalled = scoreImprovement < 0.01; // Less than 1% improvement over 3 iterations
+    }
+
+    // Determine status
+    const meetsTarget = matchPercentage >= targetScore;
+    const hitMaxIterations = iteration >= maxIterations;
+
+    let status: 'pass' | 'iterate' | 'max_iterations';
+    if (meetsTarget) {
+      status = 'pass';
+      // Mark page as passed in session
+      if (session && currentFrame) {
+        const page = session.pages.find(p => p.name === currentFrame);
+        if (page) page.status = 'passed';
+      }
+    } else if (hitMaxIterations) {
+      status = 'max_iterations';
+    } else {
+      status = 'iterate';
+    }
+
+    // Find next page if current passed
+    let nextPage: { frame: string } | null = null;
+    if (session && status === 'pass') {
+      const pending = session.pages.find(p => p.status === 'pending');
+      if (pending) {
+        nextPage = { frame: pending.name };
+      }
+    }
+
+    // Incremental comparison tracking (t-006): identify changed elements
+    if (session) {
+      // Build current snapshot
+      const currentHashes = new Map<string, string>();
+      for (const f of feedback) {
+        if (f.element) {
+          // Use message as a proxy hash for the element's comparison state
+          const existing = currentHashes.get(f.element) || '';
+          currentHashes.set(f.element, existing + '|' + f.severity + ':' + f.category);
+        }
+      }
+
+      if (session.previousSnapshot) {
+        // Identify what changed since last iteration
+        const changed = new Set<string>();
+        for (const [el, hash] of currentHashes) {
+          const prevHash = session.previousSnapshot.styleHashes.get(el);
+          if (prevHash !== hash) changed.add(el);
+        }
+        // Elements that were in previous but not in current (fixed)
+        for (const [el] of session.previousSnapshot.styleHashes) {
+          if (!currentHashes.has(el)) changed.add(el);
+        }
+        session.changedElements = changed;
+      }
+
+      session.previousSnapshot = {
+        styleHashes: currentHashes,
+        domStyles: [],
+      };
+    }
+
+    // Build prioritized fix list with dependency ordering (t-009)
+    const prioritizedFixes: Array<{ priority: number; element?: string; issue: string; fix?: string; subsumes?: string[] }> = [];
     let priority = 1;
 
-    // Missing elements first (highest impact)
+    // Dependency graph: if a missing element contains other mismatched elements,
+    // fixing the parent subsumes children
     const missingFixes = fails.filter(f => f.category === 'missing');
-    for (const f of missingFixes.slice(0, 3)) {
-      prioritizedFixes.push({ priority: priority++, element: f.element, issue: f.message, fix: f.fix });
+    const nonMissingFails = fails.filter(f => f.category !== 'missing' && f.category !== 'extra');
+
+    // Build containment map from mismatch bounds
+    const mismatchBounds = new Map<string, { x: number; y: number; width: number; height: number }>();
+    // Parse bounds from messages when available (approximate from element names)
+    for (const f of [...missingFixes, ...nonMissingFails, ...warns]) {
+      if (f.element && !mismatchBounds.has(f.element)) {
+        // Store a placeholder — actual containment uses element names heuristically
+        mismatchBounds.set(f.element, { x: 0, y: 0, width: 0, height: 0 });
+      }
     }
 
-    // Then color/layout/size fails
-    const visualFixes = fails.filter(f => f.category !== 'missing' && f.category !== 'extra');
+    // Add missing fixes first (highest priority)
+    for (const f of missingFixes.slice(0, 3)) {
+      // Check if adding this missing element would resolve child mismatches
+      const elementName = f.element || f.message.replace('Missing element: ', '');
+      const subsumed = nonMissingFails
+        .filter(child => child.element && child.element.includes(elementName))
+        .map(child => child.element!);
+
+      prioritizedFixes.push({
+        priority: priority++,
+        element: f.element,
+        issue: f.message,
+        fix: subsumed.length > 0
+          ? `${f.fix || f.message}. Adding this element may also resolve ${subsumed.length} child mismatch(es).`
+          : f.fix,
+        subsumes: subsumed.length > 0 ? subsumed : undefined,
+      });
+    }
+
+    // Add visual fixes, skipping those subsumed by missing parent fixes
+    const subsumedElements = new Set(prioritizedFixes.flatMap(f => f.subsumes || []));
+    const visualFixes = nonMissingFails.filter(f => !f.element || !subsumedElements.has(f.element));
     for (const f of visualFixes.slice(0, 5)) {
       prioritizedFixes.push({ priority: priority++, element: f.element, issue: f.message, fix: f.fix });
     }
-
-    // Then top warnings if room
     for (const f of warns.slice(0, Math.max(0, 10 - prioritizedFixes.length))) {
-      prioritizedFixes.push({ priority: priority++, element: f.element, issue: f.message, fix: f.fix });
+      if (!f.element || !subsumedElements.has(f.element)) {
+        prioritizedFixes.push({ priority: priority++, element: f.element, issue: f.message, fix: f.fix });
+      }
     }
 
-    // Build the response
+    // Score breakdown
+    const domTotal = resultJson.domDiff.matches + resultJson.domDiff.missingCount;
+    const domMatchRate = domTotal > 0 ? resultJson.domDiff.matches / domTotal : 1;
+
+    const scoreBreakdown = {
+      domMatchRate,
+      pixelDiffPercentage: resultJson.pixelDiff.diffPercentage,
+      pixelComparisonRan: resultJson.pixelDiff.pixelComparisonRan,
+      failCount: fails.length,
+      warnCount: warns.length,
+      domMatches: resultJson.domDiff.matches,
+      missingCount: resultJson.domDiff.missingCount,
+      extraCount: resultJson.domDiff.extraCount,
+      matchPercentage,
+    };
+
+    // Build full mismatch array for the agent
+    const mismatches = feedback
+      .filter(f => f.severity === 'fail' || f.severity === 'warn')
+      .map(f => ({
+        element: f.element,
+        property: f.property,
+        category: f.category,
+        expected: f.expected,
+        actual: f.actual,
+        severity: f.severity,
+        message: f.message,
+        fix: f.fix,
+      }));
+
+    // Extract missing and extra from feedback
+    const missing = feedback
+      .filter(f => f.category === 'missing')
+      .map(f => f.element || f.message);
+
+    const extra = feedback
+      .filter(f => f.category === 'extra')
+      .map(f => f.element || f.message);
+
+    // Category breakdown
+    const issueBreakdown: Record<string, number> = {};
+    for (const f of feedback) {
+      issueBreakdown[f.category] = (issueBreakdown[f.category] || 0) + 1;
+    }
+
+    // Stall-breaking strategies (t-010): analyze remaining mismatch types when stalled
+    let stallStrategy = '';
+    if (stalled) {
+      // Categorize remaining issues
+      const remainingCategories: Record<string, number> = {};
+      for (const f of [...fails, ...warns]) {
+        remainingCategories[f.category] = (remainingCategories[f.category] || 0) + 1;
+      }
+
+      const totalRemaining = fails.length + warns.length;
+      const pixelOnlyIssues = (remainingCategories['rendering'] || 0);
+      const positionSizeIssues = (remainingCategories['layout'] || 0) + (remainingCategories['size'] || 0);
+      const missingExtraIssues = (remainingCategories['missing'] || 0) + (remainingCategories['extra'] || 0);
+
+      // Detect oscillation (score going up/down alternately)
+      let oscillating = false;
+      if (session && session.history.length >= 4) {
+        const recent4 = session.history.slice(-4);
+        const diffs = [];
+        for (let i = 1; i < recent4.length; i++) {
+          diffs.push(recent4[i].score - recent4[i - 1].score);
+        }
+        oscillating = diffs.length >= 3 && diffs.some(d => d > 0) && diffs.some(d => d < 0);
+      }
+
+      if (oscillating) {
+        stallStrategy = 'Score is oscillating — recent changes may be conflicting. Revert the last change and try a different approach.';
+      } else if (totalRemaining > 0 && pixelOnlyIssues / totalRemaining > 0.6) {
+        stallStrategy = 'Mostly pixel-level differences with clean DOM — focus on visual polish: shadows, gradients, border anti-aliasing, font rendering.';
+      } else if (totalRemaining > 0 && positionSizeIssues / totalRemaining > 0.6) {
+        stallStrategy = 'Mostly position/size issues — check parent layout mode (flex vs grid vs block), container sizing, and overflow behavior.';
+      } else if (totalRemaining > 0 && missingExtraIssues / totalRemaining > 0.5) {
+        stallStrategy = 'Many missing/extra elements — the page structure may need rebuilding rather than CSS adjustments.';
+      } else if (matchPercentage < 0.8) {
+        stallStrategy = 'Score below 80% and stalled — consider using evaluate_with_vlm for qualitative VLM assessment to identify structural issues.';
+      } else {
+        stallStrategy = 'Score stalled — try broader structural changes instead of incremental CSS fixes.';
+      }
+    }
+
+    // Build message
+    let message: string;
+    let recommendation: string;
+    if (status === 'pass') {
+      message = `Page "${currentFrame || 'default'}" passed! Score: ${matchPct}% (Grade ${currentGrade}).`;
+      recommendation = nextPage
+        ? `Move to next page: set pencilFrame="${nextPage.frame}" and call refine_build with iteration=1.`
+        : 'All pages complete!';
+    } else if (status === 'max_iterations') {
+      message = `Reached max ${maxIterations} iterations. Best score: ${matchPct}% (Grade ${currentGrade}). Target was ${Math.round(targetScore * 100)}%.`;
+      recommendation = stallStrategy || 'Review remaining mismatches below and apply fixes manually.';
+    } else {
+      message = `Iteration ${iteration}: ${matchPct}% (Grade ${currentGrade}), target ${Math.round(targetScore * 100)}%. Apply fixes below and call refine_build again with iteration=${iteration + 1}.`;
+      recommendation = stalled
+        ? stallStrategy
+        : 'Apply the fixes below, then call refine_build again.';
+    }
+
+    // Pencil reference image hint (t-013)
+    if (pencilFile && !params.referenceImage) {
+      recommendation += ' Tip: For more accurate pixel comparison, provide a referenceImage captured via Pencil MCP get_screenshot.';
+    }
+
+    // Build response
     const response: Record<string, unknown> = {
       status,
       iteration,
       score: `${matchPct}%`,
       grade: currentGrade,
-      targetGrade,
-      domMatches: resultJson.domDiff.matches,
-      missingElements: resultJson.domDiff.missingCount,
-      failCount: fails.length,
-      warnCount: warns.length,
-      pixelComparisonRan: resultJson.pixelDiff.pixelComparisonRan,
+      targetScore: `${Math.round(targetScore * 100)}%`,
+      stalled,
+      message,
+      recommendation,
+      scoreBreakdown,
+      mismatches,
+      missing,
+      extra,
+      topFixes: prioritizedFixes,
+      issueBreakdown,
     };
 
-    if (status === 'pass') {
-      response.message = `Build meets target grade ${targetGrade}! Score: ${matchPct}% (Grade ${currentGrade})`;
-    } else if (status === 'max_iterations') {
-      response.message = `Reached max ${maxIterations} iterations. Best score: ${matchPct}% (Grade ${currentGrade}). Target was ${targetGrade}.`;
-      response.topFixes = prioritizedFixes;
-    } else {
-      response.message = `Iteration ${iteration}: ${matchPct}% (Grade ${currentGrade}), target ${targetGrade}. Apply fixes below and call refine_build again with iteration=${iteration + 1}.`;
-      response.topFixes = prioritizedFixes;
-
-      // Category breakdown for context
-      const categoryBreakdown: Record<string, number> = {};
-      for (const f of feedback) {
-        categoryBreakdown[f.category] = (categoryBreakdown[f.category] || 0) + 1;
+    // Add page progress if we have a session
+    if (session) {
+      response.pageProgress = session.pages.map(p => ({
+        frame: p.name,
+        status: p.status,
+        score: `${Math.round(p.score * 100)}%`,
+        iterations: p.iterations,
+      }));
+      if (nextPage) {
+        response.nextPage = nextPage;
       }
-      response.issueBreakdown = categoryBreakdown;
+    }
+
+    // Add iteration history for progress tracking
+    if (session && session.history.length > 0) {
+      response.iterationHistory = session.history.map(h => ({
+        iteration: h.iteration,
+        score: `${Math.round(h.score * 100)}%`,
+        grade: h.grade,
+      }));
+    }
+
+    // Incremental comparison: show which elements changed since last iteration (t-006)
+    if (session?.changedElements && session.changedElements.size > 0 && iteration > 1) {
+      response.changedSinceLastIteration = Array.from(session.changedElements);
+    }
+
+    // Stall strategy detail (t-010)
+    if (stalled && stallStrategy) {
+      response.stallStrategy = stallStrategy;
     }
 
     return {
@@ -1066,6 +1424,283 @@ class MCPServer {
         },
       ],
     };
+  }
+
+  private async planBuild(params: PlanBuildParams) {
+    const fs = await import('fs/promises');
+    const path = await import('path');
+
+    const pencilFile = path.resolve(params.pencilFile);
+    const buildDir = params.buildDir || './build';
+    const techStack = params.techStack || 'html';
+    const targetScore = params.targetScore ?? 0.95;
+    const maxIterations = params.maxIterationsPerPage ?? 10;
+    const targetPct = Math.round(targetScore * 100);
+
+    // Read and parse the .pen file
+    const content = await fs.readFile(pencilFile, 'utf-8');
+    const penData = JSON.parse(content);
+    const parser = new PencilParser();
+
+    // Discover all frames
+    const frames = parser.listFrames(penData);
+    if (frames.length === 0) {
+      throw {
+        code: ErrorCode.InvalidParams,
+        message: 'No named frames found in .pen file. The design must have at least one top-level frame.',
+      };
+    }
+
+    // Extract global tokens
+    const tokens = parser.extractTokensFromFile(penData, params.pencilTheme);
+
+    // Build per-page plans
+    const pages = frames.map(frame => {
+      // Parse this frame's design state
+      const designState = parser.parse(penData, {
+        frameName: frame.name,
+        themeMode: params.pencilTheme,
+      });
+
+      // Generate human-readable node tree
+      const nodeTree = parser.describeNodeTree(designState.nodes);
+
+      // Flatten node IDs for data-pen-id instructions
+      const nodeIds = parser.flattenNodeIds(designState.nodes);
+
+      // Determine file extension based on tech stack
+      const ext = techStack === 'html' ? '.html' : techStack === 'react' ? '.tsx' : '.tsx';
+      const safeName = frame.name.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+
+      // Pre-fill refine params
+      const refineParams = {
+        designSource: {
+          pencilFile,
+          pencilFrame: frame.name,
+          ...(params.pencilTheme ? { pencilTheme: params.pencilTheme } : {}),
+        },
+        targetScore,
+        maxIterations,
+      };
+
+      // Format tokens for the prompt
+      const tokenSummary = this.formatTokenSummary(tokens);
+
+      // Build the agent prompt
+      const agentPrompt = this.buildAgentPrompt({
+        frameName: frame.name,
+        width: frame.width || designState.viewport.width,
+        height: frame.height || designState.viewport.height,
+        nodeTree,
+        nodeIds,
+        tokenSummary,
+        buildDir,
+        techStack,
+        ext,
+        safeName,
+        targetPct,
+        refineParams,
+        pencilFile,
+      });
+
+      return {
+        frame: frame.name,
+        frameId: frame.id,
+        viewport: {
+          width: frame.width || designState.viewport.width,
+          height: frame.height || designState.viewport.height,
+        },
+        nodeCount: nodeIds.length,
+        nodeIds: nodeIds.map(n => ({ id: n.id, name: n.name, type: n.type })),
+        nodeTree,
+        designTokens: tokens || undefined,
+        agentPrompt,
+        refineParams,
+      };
+    });
+
+    // Build orchestration prompt
+    const orchestrationPrompt = this.buildOrchestrationPrompt({
+      projectName: penData.version || path.basename(pencilFile, '.pen'),
+      pages,
+      targetPct,
+      buildDir,
+      techStack,
+    });
+
+    const response = {
+      projectName: penData.version || path.basename(pencilFile, '.pen'),
+      totalPages: pages.length,
+      targetScore: `${targetPct}%`,
+      buildDir,
+      techStack,
+      pages: pages.map(p => ({
+        frame: p.frame,
+        frameId: p.frameId,
+        viewport: p.viewport,
+        nodeCount: p.nodeCount,
+        nodeIds: p.nodeIds,
+        nodeTree: p.nodeTree,
+        designTokens: p.designTokens,
+        agentPrompt: p.agentPrompt,
+        refineParams: p.refineParams,
+      })),
+      orchestrationPrompt,
+    };
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(response, null, 2),
+        },
+      ],
+    };
+  }
+
+  private formatTokenSummary(tokens: import('../core/types.js').DesignTokens | undefined): string {
+    if (!tokens) return 'No design tokens defined.';
+
+    const sections: string[] = [];
+
+    const colorEntries = Object.entries(tokens.colors);
+    if (colorEntries.length > 0) {
+      sections.push('Colors:\n' + colorEntries.map(([k, v]) => `  ${k}: ${v}`).join('\n'));
+    }
+
+    const spacingEntries = Object.entries(tokens.spacing);
+    if (spacingEntries.length > 0) {
+      sections.push('Spacing:\n' + spacingEntries.map(([k, v]) => `  ${k}: ${v}`).join('\n'));
+    }
+
+    const typoEntries = Object.entries(tokens.typography);
+    if (typoEntries.length > 0) {
+      sections.push('Typography:\n' + typoEntries.map(([k, v]) => `  ${k}: ${v.fontFamily} ${v.fontSize}/${v.lineHeight} (${v.fontWeight})`).join('\n'));
+    }
+
+    const radiiEntries = Object.entries(tokens.radii);
+    if (radiiEntries.length > 0) {
+      sections.push('Border Radii:\n' + radiiEntries.map(([k, v]) => `  ${k}: ${v}`).join('\n'));
+    }
+
+    return sections.length > 0 ? sections.join('\n\n') : 'No design tokens defined.';
+  }
+
+  private buildAgentPrompt(opts: {
+    frameName: string;
+    width: number;
+    height: number;
+    nodeTree: string;
+    nodeIds: Array<{ id: string; name: string; type: string }>;
+    tokenSummary: string;
+    buildDir: string;
+    techStack: string;
+    ext: string;
+    safeName: string;
+    targetPct: number;
+    refineParams: Record<string, unknown>;
+    pencilFile: string;
+  }): string {
+    const nodeIdList = opts.nodeIds
+      .map(n => `  data-pen-id="${n.id}" → ${n.name} (${n.type})`)
+      .join('\n');
+
+    return `You are building a single page from a design specification.
+
+## Design: ${opts.frameName}
+Viewport: ${opts.width}×${opts.height}
+
+## Design Structure
+${opts.nodeTree}
+
+## Design Tokens
+${opts.tokenSummary}
+
+## Build Instructions
+1. Create ${opts.buildDir}/${opts.safeName}${opts.ext}
+2. Add data-pen-id="{nodeId}" to each HTML element matching design nodes
+3. Match colors, spacing, typography, and layout exactly from the design structure above
+4. Use semantic HTML${opts.techStack === 'html' ? ' with CSS (inline or <style> block)' : opts.techStack === 'react' ? ' with React components and CSS modules or styled-components' : ' with Next.js pages and CSS modules'}
+5. Ensure the page renders at ${opts.width}×${opts.height} viewport
+
+## Node IDs (add as data-pen-id attributes)
+${nodeIdList}
+
+## Step 1: Capture Reference Screenshot
+Before building, capture a pixel-perfect reference image of the design:
+\`\`\`
+get_screenshot({ pencilFile: "${opts.pencilFile}", nodeId: "${opts.nodeIds[0]?.id || 'frameId'}" })
+\`\`\`
+Save the returned screenshot to a file (e.g., ${opts.buildDir}/${opts.safeName}-ref.png).
+This will be used for pixel-accurate comparison during refinement.
+
+## Step 2: Build the Page
+Create ${opts.buildDir}/${opts.safeName}${opts.ext} with all the design elements listed above.
+
+## Step 3: Start Dev Server
+Start a local dev server if one isn't already running:
+\`\`\`
+npx serve ${opts.buildDir}
+\`\`\`
+
+## Step 4: Iterate with refine_build
+1. Call refine_build with:
+   ${JSON.stringify(opts.refineParams, null, 2).split('\n').join('\n   ')}
+   Set buildUrl to the URL serving your page (e.g., http://localhost:3000/${opts.safeName}${opts.ext})
+   Set referenceImage to the path of the screenshot you captured in Step 1
+2. Read the mismatches and topFixes in the response
+3. Apply the fixes to your code
+4. Call refine_build again with iteration incremented
+5. Repeat until status="pass" (score ≥ ${opts.targetPct}%)
+6. When done, report your final score and any remaining issues
+
+## Tips
+- Focus on matching the design structure first (correct elements, hierarchy, data-pen-id), then refine visual properties (colors, spacing, typography)
+- If stalled, read the stallStrategy in refine_build's response for guidance
+- If score is below 80% and stalled, use evaluate_with_vlm for qualitative assessment (requires ANTHROPIC_API_KEY)
+
+IMPORTANT: Focus only on this page. Do not modify other pages.`;
+  }
+
+  private buildOrchestrationPrompt(opts: {
+    projectName: string;
+    pages: Array<{ frame: string; viewport: { width: number; height: number }; nodeCount: number }>;
+    targetPct: number;
+    buildDir: string;
+    techStack: string;
+  }): string {
+    const pageList = opts.pages
+      .map((p, i) => `${i + 1}. "${p.frame}" — ${p.viewport.width}×${p.viewport.height}, ${p.nodeCount} design nodes`)
+      .join('\n');
+
+    return `## Saccadic Build Plan: ${opts.projectName}
+${opts.pages.length} pages to build. Target: ${opts.targetPct}% match per page.
+
+### Setup
+1. Create the build directory: ${opts.buildDir}/
+2. Set up a local dev server to serve the built files (e.g., npx serve ${opts.buildDir})
+3. Each page is independent — build them in parallel
+
+### Pages
+${pageList}
+
+### Execution Steps
+For each page, spawn a sub-agent (via Task tool) with that page's agentPrompt from the plan.
+Each sub-agent:
+1. Captures a reference screenshot via Pencil MCP get_screenshot (for pixel-accurate comparison)
+2. Builds the HTML/CSS for its page with data-pen-id attributes
+3. Calls refine_build with the reference screenshot to check accuracy
+4. Applies fixes from the topFixes in the response
+5. Repeats until status="pass" (≥${opts.targetPct}%)
+
+### Parallel Execution
+Launch all ${opts.pages.length} sub-agents simultaneously. Each has a clean context
+with only its page's design information — no cross-page context pollution.
+
+### After All Pages Complete
+1. Collect final scores from each sub-agent
+2. Report per-page results
+3. If any page didn't reach ${opts.targetPct}%, review its remaining mismatches`;
   }
 
   async cleanup() {

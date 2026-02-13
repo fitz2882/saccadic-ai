@@ -485,13 +485,101 @@ export class PencilParser {
     const fontSize = typeof node.fontSize === 'number' ? node.fontSize : 16;
     const lineHeightMultiplier = node.lineHeight ?? 1.2;
 
+    // For text nodes, the .pen `fill` property is the foreground text color
+    let color: string | undefined;
+    if (node.type === 'text' && node.fill) {
+      if (typeof node.fill === 'string' && node.fill !== 'transparent' && node.fill !== '') {
+        color = node.fill;
+      } else if (typeof node.fill === 'object' && (node.fill as any).color) {
+        color = (node.fill as any).color;
+      }
+    }
+
     return {
       fontFamily: (typeof node.fontFamily === 'string' ? node.fontFamily : 'Inter'),
       fontSize,
       fontWeight: typeof node.fontWeight === 'number' ? node.fontWeight : 400,
       lineHeight: lineHeightMultiplier * fontSize,
       letterSpacing: node.letterSpacing,
+      color,
     };
+  }
+
+  /**
+   * Generate a human-readable tree description of a DesignState's node hierarchy.
+   * Includes key visual properties: fills, typography, bounds, cornerRadius.
+   */
+  describeNodeTree(nodes: DesignNode[]): string {
+    const lines: string[] = [];
+    const walk = (node: DesignNode, prefix: string, isLast: boolean) => {
+      const connector = prefix === '' ? '' : isLast ? '└── ' : '├── ';
+      const childPrefix = prefix === '' ? '' : prefix + (isLast ? '    ' : '│   ');
+
+      // Build property annotations
+      const props: string[] = [];
+      props.push(`${Math.round(node.bounds.width)}×${Math.round(node.bounds.height)}`);
+
+      if (node.fills?.length) {
+        const solidFill = node.fills.find(f => f.type === 'SOLID' && f.color);
+        if (solidFill?.color) props.push(`bg: ${solidFill.color}`);
+      }
+      if (node.typography) {
+        if (node.typography.fontSize) props.push(`fontSize: ${node.typography.fontSize}`);
+        if (node.typography.fontWeight && node.typography.fontWeight !== 400) props.push(`fontWeight: ${node.typography.fontWeight}`);
+        if (node.typography.color) props.push(`color: ${node.typography.color}`);
+      }
+      if (typeof node.cornerRadius === 'number' && node.cornerRadius > 0) {
+        props.push(`borderRadius: ${node.cornerRadius}`);
+      }
+      if (node.layoutMode && node.layoutMode !== 'NONE') {
+        props.push(`layout: ${node.layoutMode.toLowerCase()}`);
+      }
+      if (node.gap) props.push(`gap: ${node.gap}`);
+
+      const textSnippet = node.textContent
+        ? ` "${node.textContent.length > 50 ? node.textContent.slice(0, 47) + '...' : node.textContent}"`
+        : '';
+
+      lines.push(`${prefix}${connector}${node.type} "${node.name}"${textSnippet} (${props.join(', ')})`);
+
+      if (node.children?.length) {
+        for (let i = 0; i < node.children.length; i++) {
+          walk(node.children[i], childPrefix, i === node.children.length - 1);
+        }
+      }
+    };
+
+    for (let i = 0; i < nodes.length; i++) {
+      walk(nodes[i], '', i === nodes.length - 1);
+    }
+    return lines.join('\n');
+  }
+
+  /**
+   * Flatten all node IDs from a DesignNode tree.
+   */
+  flattenNodeIds(nodes: DesignNode[]): Array<{ id: string; name: string; type: string }> {
+    const result: Array<{ id: string; name: string; type: string }> = [];
+    const walk = (node: DesignNode) => {
+      result.push({ id: node.id, name: node.name, type: node.type });
+      if (node.children) node.children.forEach(walk);
+    };
+    nodes.forEach(walk);
+    return result;
+  }
+
+  /**
+   * List top-level named frames in a .pen file (for multi-page discovery).
+   */
+  listFrames(penData: PenFile): Array<{ id: string; name: string; width: number; height: number }> {
+    return (penData.children || [])
+      .filter(c => c.type === 'frame' && c.name)
+      .map(c => ({
+        id: c.id,
+        name: c.name || c.id,
+        width: typeof c.width === 'number' ? c.width : 0,
+        height: typeof c.height === 'number' ? c.height : 0,
+      }));
   }
 
   /**
