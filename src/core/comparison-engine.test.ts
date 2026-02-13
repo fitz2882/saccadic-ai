@@ -361,7 +361,7 @@ describe('ComparisonEngine', () => {
             severity: 'warn',
           },
         ],
-        missing: [],
+        missing: ['el1'],
         extra: [],
       };
 
@@ -405,7 +405,7 @@ describe('ComparisonEngine', () => {
             severity: 'warn',
           },
         ],
-        missing: [],
+        missing: ['el1', 'el2', 'el3'],
         extra: [],
       };
 
@@ -425,7 +425,7 @@ describe('ComparisonEngine', () => {
 
     it('should compute Grade F for poor match', () => {
       const domDiff: DOMDiffResult = {
-        matches: 5,
+        matches: 3,
         mismatches: [
           {
             element: '.button',
@@ -449,14 +449,14 @@ describe('ComparisonEngine', () => {
             severity: 'fail',
           },
         ],
-        missing: ['.icon', '.badge'],
+        missing: ['.icon', '.badge', '.card', '.header', '.nav', '.footer', '.sidebar'],
         extra: [],
       };
 
       const pixelDiff: PixelDiffResult = {
         totalPixels: 1000,
         diffPixels: 500,
-        diffPercentage: 0.5,
+        diffPercentage: 50,
         pixelComparisonRan: true,
       };
 

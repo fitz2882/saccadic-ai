@@ -35,7 +35,7 @@ describe('MCP Protocol Integration', () => {
     });
 
     const result = response.result as { tools: Array<{ name: string; inputSchema: unknown }> };
-    expect(result.tools.length).toBe(7);
+    expect(result.tools.length).toBe(8);
 
     const toolNames = result.tools.map((t) => t.name);
     expect(toolNames).toContain('capture_screenshot');

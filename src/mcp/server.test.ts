@@ -39,7 +39,7 @@ describe('MCPServer', () => {
   });
 
   describe('tools/list', () => {
-    it('should return 5 tools', async () => {
+    it('should return 8 tools', async () => {
       const request = {
         jsonrpc: '2.0' as const,
         id: 2,
@@ -53,7 +53,7 @@ describe('MCPServer', () => {
       expect(response.result).toHaveProperty('tools');
 
       const result = response.result as { tools: unknown[] };
-      expect(result.tools).toHaveLength(7);
+      expect(result.tools).toHaveLength(8);
     });
 
     it('should have valid tool definitions with JSON Schema', async () => {

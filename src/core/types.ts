@@ -335,6 +335,18 @@ export interface CompareDesignBuildParams {
   viewport?: string | Viewport;
   selector?: string;
   threshold?: number;
+  referenceImage?: string; // base64, file path, or URL to a design screenshot
+}
+
+export interface RefineBuildParams {
+  designSource: LoadDesignParams;
+  buildUrl: string;
+  referenceImage?: string;
+  targetGrade?: 'A' | 'B' | 'C';
+  viewport?: string | Viewport;
+  selector?: string;
+  iteration?: number;
+  maxIterations?: number;
 }
 
 export interface GetVisualDiffParams {

@@ -22,6 +22,7 @@ import type {
   CaptureScreenshotParams,
   LoadDesignParams,
   CompareDesignBuildParams,
+  RefineBuildParams,
   GetVisualDiffParams,
   GetDesignTokensParams,
   CompareDesignTokensParams,
@@ -144,7 +145,7 @@ const TOOLS = [
   },
   {
     name: 'compare_design_build',
-    description: 'Run full comparison pipeline between design and build implementation. For best results, add data-pen-id attributes to build elements matching design node IDs from load_design.',
+    description: 'Run full comparison pipeline between design and build implementation. For best results: (1) add data-pen-id attributes to build elements matching design node IDs from load_design, (2) provide a referenceImage for accurate pixel comparison — use Pencil MCP get_screenshot for .pen designs, or set FIGMA_TOKEN for auto-fetching Figma renders.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -189,6 +190,10 @@ const TOOLS = [
           description: 'Match threshold (0-1, default 0.95)',
           minimum: 0,
           maximum: 1,
+        },
+        referenceImage: {
+          type: 'string',
+          description: 'Design screenshot as base64 string, file path, or URL. For Pencil designs, use get_screenshot from the Pencil MCP. For Figma, this is auto-fetched from the Figma Images API if FIGMA_TOKEN is set. Without a reference image, pixel comparison uses an auto-generated approximation.',
         },
       },
       required: ['designSource', 'buildUrl'],
@@ -283,6 +288,71 @@ const TOOLS = [
         },
       },
       required: ['designImage', 'buildImage'],
+    },
+  },
+  {
+    name: 'refine_build',
+    description:
+      'Iterative build refinement tool. Compares a build against a design and returns prioritized, actionable fixes. ' +
+      'Call repeatedly after applying fixes until status is "pass". ' +
+      'Each call should target a single page/frame. Clear your build context between pages for best results.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        designSource: {
+          type: 'object',
+          properties: {
+            figmaUrl: { type: 'string' },
+            figmaFileKey: { type: 'string' },
+            tokenFile: { type: 'string' },
+            nodeId: { type: 'string' },
+            pencilFile: { type: 'string' },
+            pencilFrame: { type: 'string' },
+            pencilTheme: { type: 'string' },
+          },
+          description: 'Design source parameters',
+        },
+        buildUrl: {
+          type: 'string',
+          description: 'URL of the built implementation',
+        },
+        referenceImage: {
+          type: 'string',
+          description: 'Design screenshot (base64 data URI, file path, or URL). Use Pencil MCP get_screenshot for .pen designs.',
+        },
+        targetGrade: {
+          type: 'string',
+          enum: ['A', 'B', 'C'],
+          description: 'Target grade to reach before status becomes "pass" (default: B)',
+        },
+        viewport: {
+          oneOf: [
+            { type: 'string', enum: ['mobile-sm', 'mobile', 'tablet', 'desktop-sm', 'desktop', 'desktop-lg'] },
+            {
+              type: 'object',
+              properties: {
+                width: { type: 'number' },
+                height: { type: 'number' },
+              },
+              required: ['width', 'height'],
+            },
+          ],
+          description: 'Viewport preset or custom size',
+        },
+        selector: {
+          type: 'string',
+          description: 'CSS selector to target specific element',
+        },
+        iteration: {
+          type: 'number',
+          description: 'Current iteration number (for tracking progress). Start at 1.',
+        },
+        maxIterations: {
+          type: 'number',
+          description: 'Maximum iterations before forcing stop (default: 10)',
+        },
+      },
+      required: ['designSource', 'buildUrl'],
     },
   },
 ];
@@ -434,6 +504,9 @@ class MCPServer {
       case 'evaluate_with_vlm':
         return await this.evaluateWithVLM(args as EvaluateWithVLMParams);
 
+      case 'refine_build':
+        return await this.refineBuild(args as RefineBuildParams);
+
       default:
         throw {
           code: ErrorCode.MethodNotFound,
@@ -571,7 +644,7 @@ class MCPServer {
               nodeCount: design.nodes.length,
               hasTokens: !!design.tokens,
               nodeIds,
-              instructions: 'Add data-pen-id="{nodeId}" to each corresponding HTML element for accurate comparison. For example: <div data-pen-id="navHome">',
+              instructions: 'Add data-pen-id="{nodeId}" to each corresponding HTML element for accurate comparison. For example: <div data-pen-id="navHome">. For pixel-accurate comparison, provide a referenceImage to compare_design_build — use Pencil MCP get_screenshot to capture the design frame as a PNG.',
             },
             null,
             2
@@ -586,6 +659,7 @@ class MCPServer {
     await engine.init();
 
     const viewport = this.resolveViewport(params.viewport);
+    const tempFiles: string[] = [];
 
     // Extract Figma file key from URL if provided
     let figmaFileKey = params.designSource.figmaFileKey;
@@ -596,6 +670,49 @@ class MCPServer {
       }
     }
 
+    // Resolve reference image:
+    // 1. Use explicitly provided referenceImage (data URI, file path, or URL)
+    // 2. For Figma: auto-fetch from Figma Images API
+    // 3. Fall back to auto-generated approximation in comparison-engine
+    let referenceImage = params.referenceImage;
+
+    if (!referenceImage && figmaFileKey && process.env.FIGMA_TOKEN) {
+      try {
+        const parser = new DesignParser();
+        const imageBuffer = await parser.getFigmaScreenshot(
+          figmaFileKey,
+          params.designSource.nodeId
+        );
+        const fs = await import('fs/promises');
+        const path = await import('path');
+        const os = await import('os');
+        const tmpPath = path.join(os.tmpdir(), `saccadic-figma-ref-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.png`);
+        await fs.writeFile(tmpPath, imageBuffer);
+        referenceImage = tmpPath;
+        tempFiles.push(tmpPath);
+      } catch (error) {
+        process.stderr.write(`[saccadic] Figma screenshot auto-fetch failed: ${error instanceof Error ? error.message : error}\n`);
+      }
+    }
+
+    // If referenceImage is a data URI, write to temp file
+    if (referenceImage && referenceImage.startsWith('data:image')) {
+      try {
+        const fs = await import('fs/promises');
+        const path = await import('path');
+        const os = await import('os');
+        const tmpPath = path.join(os.tmpdir(), `saccadic-ref-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.png`);
+        const base64Data = referenceImage.split(',')[1];
+        await fs.writeFile(tmpPath, Buffer.from(base64Data, 'base64'));
+        referenceImage = tmpPath;
+        tempFiles.push(tmpPath);
+      } catch (error) {
+        process.stderr.write(`[saccadic] Base64 decode failed: ${error instanceof Error ? error.message : error}\n`);
+        referenceImage = undefined;
+      }
+    }
+
+    try {
     const result = await engine.compare({
       designSource: {
         figmaFileKey,
@@ -604,7 +721,7 @@ class MCPServer {
         pencilFile: params.designSource.pencilFile,
         pencilFrame: params.designSource.pencilFrame,
         pencilTheme: params.designSource.pencilTheme,
-        referenceImage: undefined,
+        referenceImage,
       },
       buildUrl: params.buildUrl,
       viewport,
@@ -650,6 +767,13 @@ class MCPServer {
     }
 
     return { content };
+    } finally {
+      // Clean up temp files
+      if (tempFiles.length > 0) {
+        const fs = await import('fs/promises');
+        await Promise.all(tempFiles.map(f => fs.unlink(f).catch(() => {})));
+      }
+    }
   }
 
   private async getVisualDiff(params: GetVisualDiffParams) {
@@ -820,6 +944,125 @@ class MCPServer {
         {
           type: 'text',
           text: JSON.stringify(evaluation, null, 2),
+        },
+      ],
+    };
+  }
+
+  private async refineBuild(params: RefineBuildParams) {
+    const targetGrade = params.targetGrade || 'B';
+    const iteration = params.iteration || 1;
+    const maxIterations = params.maxIterations || 10;
+
+    const gradeThresholds: Record<string, number> = { A: 0.95, B: 0.85, C: 0.7 };
+    const targetThreshold = gradeThresholds[targetGrade] || 0.85;
+
+    // Delegate to compareDesignBuild for the actual comparison
+    const compareResult = await this.compareDesignBuild({
+      designSource: params.designSource,
+      buildUrl: params.buildUrl,
+      viewport: params.viewport,
+      selector: params.selector,
+      threshold: targetThreshold,
+      referenceImage: params.referenceImage,
+    });
+
+    // Parse the comparison result from the JSON content
+    const resultJson = JSON.parse(
+      (compareResult.content[0] as { type: string; text: string }).text
+    );
+
+    const currentGrade = resultJson.overall.grade as string;
+    const matchPct = Math.round(resultJson.overall.matchPercentage * 100);
+    const gradeOrder = ['F', 'D', 'C', 'B', 'A'];
+    const meetsTarget = gradeOrder.indexOf(currentGrade) >= gradeOrder.indexOf(targetGrade);
+    const hitMaxIterations = iteration >= maxIterations;
+
+    // Determine status
+    let status: 'pass' | 'iterate' | 'max_iterations';
+    if (meetsTarget) {
+      status = 'pass';
+    } else if (hitMaxIterations) {
+      status = 'max_iterations';
+    } else {
+      status = 'iterate';
+    }
+
+    // Prioritize fixes: group by element, fail before warn, limit to top issues
+    const feedback = resultJson.feedback as Array<{
+      severity: string;
+      category: string;
+      message: string;
+      element?: string;
+      fix?: string;
+    }>;
+
+    const fails = feedback.filter(f => f.severity === 'fail');
+    const warns = feedback.filter(f => f.severity === 'warn');
+
+    // Group fails by category for concise output
+    const failsByCategory: Record<string, typeof fails> = {};
+    for (const f of fails) {
+      (failsByCategory[f.category] ??= []).push(f);
+    }
+
+    // Build prioritized fix list (top 10 most impactful)
+    const prioritizedFixes: Array<{ priority: number; element?: string; issue: string; fix?: string }> = [];
+    let priority = 1;
+
+    // Missing elements first (highest impact)
+    const missingFixes = fails.filter(f => f.category === 'missing');
+    for (const f of missingFixes.slice(0, 3)) {
+      prioritizedFixes.push({ priority: priority++, element: f.element, issue: f.message, fix: f.fix });
+    }
+
+    // Then color/layout/size fails
+    const visualFixes = fails.filter(f => f.category !== 'missing' && f.category !== 'extra');
+    for (const f of visualFixes.slice(0, 5)) {
+      prioritizedFixes.push({ priority: priority++, element: f.element, issue: f.message, fix: f.fix });
+    }
+
+    // Then top warnings if room
+    for (const f of warns.slice(0, Math.max(0, 10 - prioritizedFixes.length))) {
+      prioritizedFixes.push({ priority: priority++, element: f.element, issue: f.message, fix: f.fix });
+    }
+
+    // Build the response
+    const response: Record<string, unknown> = {
+      status,
+      iteration,
+      score: `${matchPct}%`,
+      grade: currentGrade,
+      targetGrade,
+      domMatches: resultJson.domDiff.matches,
+      missingElements: resultJson.domDiff.missingCount,
+      failCount: fails.length,
+      warnCount: warns.length,
+      pixelComparisonRan: resultJson.pixelDiff.pixelComparisonRan,
+    };
+
+    if (status === 'pass') {
+      response.message = `Build meets target grade ${targetGrade}! Score: ${matchPct}% (Grade ${currentGrade})`;
+    } else if (status === 'max_iterations') {
+      response.message = `Reached max ${maxIterations} iterations. Best score: ${matchPct}% (Grade ${currentGrade}). Target was ${targetGrade}.`;
+      response.topFixes = prioritizedFixes;
+    } else {
+      response.message = `Iteration ${iteration}: ${matchPct}% (Grade ${currentGrade}), target ${targetGrade}. Apply fixes below and call refine_build again with iteration=${iteration + 1}.`;
+      response.topFixes = prioritizedFixes;
+
+      // Category breakdown for context
+      const categoryBreakdown: Record<string, number> = {};
+      for (const f of feedback) {
+        categoryBreakdown[f.category] = (categoryBreakdown[f.category] || 0) + 1;
+      }
+      response.issueBreakdown = categoryBreakdown;
+    }
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(response, null, 2),
         },
       ],
     };
