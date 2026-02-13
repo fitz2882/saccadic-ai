@@ -1454,29 +1454,52 @@ class MCPServer {
     // Extract global tokens
     const tokens = parser.extractTokensFromFile(penData, params.pencilTheme);
 
+    // Group frames into responsive page groups (desktop + mobile = one page)
+    const pageGroups = this.groupResponsiveFrames(frames);
+
     // Build per-page plans
-    const pages = frames.map(frame => {
-      // Parse this frame's design state
+    const pages = pageGroups.map(group => {
+      const primary = group.desktop || group.frames[0];
+
+      // Parse primary (desktop) frame's design state
       const designState = parser.parse(penData, {
-        frameName: frame.name,
+        frameName: primary.name,
         themeMode: params.pencilTheme,
       });
 
-      // Generate human-readable node tree
+      // Generate human-readable node tree for primary
       const nodeTree = parser.describeNodeTree(designState.nodes);
-
-      // Flatten node IDs for data-pen-id instructions
       const nodeIds = parser.flattenNodeIds(designState.nodes);
+
+      // Parse mobile variant if present
+      let mobileNodeTree: string | undefined;
+      let mobileNodeIds: Array<{ id: string; name: string; type: string }> | undefined;
+      let mobileViewport: { width: number; height: number } | undefined;
+      let mobileFrameName: string | undefined;
+
+      if (group.mobile) {
+        const mobileState = parser.parse(penData, {
+          frameName: group.mobile.name,
+          themeMode: params.pencilTheme,
+        });
+        mobileNodeTree = parser.describeNodeTree(mobileState.nodes);
+        mobileNodeIds = parser.flattenNodeIds(mobileState.nodes);
+        mobileViewport = {
+          width: group.mobile.width || mobileState.viewport.width,
+          height: group.mobile.height || mobileState.viewport.height,
+        };
+        mobileFrameName = group.mobile.name;
+      }
 
       // Determine file extension based on tech stack
       const ext = techStack === 'html' ? '.html' : techStack === 'react' ? '.tsx' : '.tsx';
-      const safeName = frame.name.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+      const safeName = group.pageName.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
 
-      // Pre-fill refine params
+      // Pre-fill refine params (for desktop/primary)
       const refineParams = {
         designSource: {
           pencilFile,
-          pencilFrame: frame.name,
+          pencilFrame: primary.name,
           ...(params.pencilTheme ? { pencilTheme: params.pencilTheme } : {}),
         },
         targetScore,
@@ -1486,11 +1509,16 @@ class MCPServer {
       // Format tokens for the prompt
       const tokenSummary = this.formatTokenSummary(tokens);
 
+      const primaryViewport = {
+        width: primary.width || designState.viewport.width,
+        height: primary.height || designState.viewport.height,
+      };
+
       // Build the agent prompt
       const agentPrompt = this.buildAgentPrompt({
-        frameName: frame.name,
-        width: frame.width || designState.viewport.width,
-        height: frame.height || designState.viewport.height,
+        frameName: group.pageName,
+        width: primaryViewport.width,
+        height: primaryViewport.height,
         nodeTree,
         nodeIds,
         tokenSummary,
@@ -1501,28 +1529,58 @@ class MCPServer {
         targetPct,
         refineParams,
         pencilFile,
+        // Responsive variant
+        mobileNodeTree,
+        mobileNodeIds,
+        mobileViewport,
+        mobileFrameName,
+        desktopFrameName: group.mobile ? primary.name : undefined,
       });
 
       return {
-        frame: frame.name,
-        frameId: frame.id,
-        viewport: {
-          width: frame.width || designState.viewport.width,
-          height: frame.height || designState.viewport.height,
-        },
-        nodeCount: nodeIds.length,
+        frame: group.pageName,
+        frameId: primary.id,
+        viewport: primaryViewport,
+        ...(mobileViewport ? { mobileViewport } : {}),
+        ...(mobileFrameName ? {
+          responsiveVariants: {
+            desktop: primary.name,
+            mobile: mobileFrameName,
+          },
+        } : {}),
+        nodeCount: nodeIds.length + (mobileNodeIds?.length || 0),
         nodeIds: nodeIds.map(n => ({ id: n.id, name: n.name, type: n.type })),
+        ...(mobileNodeIds ? { mobileNodeIds: mobileNodeIds.map(n => ({ id: n.id, name: n.name, type: n.type })) } : {}),
         nodeTree,
+        ...(mobileNodeTree ? { mobileNodeTree } : {}),
         designTokens: tokens || undefined,
         agentPrompt,
         refineParams,
+        ...(mobileFrameName ? {
+          mobileRefineParams: {
+            designSource: {
+              pencilFile,
+              pencilFrame: mobileFrameName,
+              ...(params.pencilTheme ? { pencilTheme: params.pencilTheme } : {}),
+            },
+            targetScore,
+            maxIterations,
+            viewport: mobileViewport,
+          },
+        } : {}),
       };
     });
 
     // Build orchestration prompt
     const orchestrationPrompt = this.buildOrchestrationPrompt({
       projectName: penData.version || path.basename(pencilFile, '.pen'),
-      pages,
+      pages: pages.map(p => ({
+        frame: p.frame,
+        viewport: p.viewport,
+        nodeCount: p.nodeCount,
+        mobileViewport: (p as any).mobileViewport,
+        responsiveVariants: (p as any).responsiveVariants,
+      })),
       targetPct,
       buildDir,
       techStack,
@@ -1556,6 +1614,108 @@ class MCPServer {
         },
       ],
     };
+  }
+
+  /**
+   * Group frames into responsive page groups.
+   * Detects mobile/desktop pairs by name similarity and viewport width.
+   * Mobile frames (width <= 500) are grouped with their desktop counterpart.
+   */
+  private groupResponsiveFrames(
+    frames: Array<{ id: string; name: string; width: number; height: number }>
+  ): Array<{
+    pageName: string;
+    desktop?: typeof frames[0];
+    mobile?: typeof frames[0];
+    frames: typeof frames;
+  }> {
+    const MOBILE_MAX_WIDTH = 500;
+    const mobilePatterns = /\b(mobile|phone|sm|small|narrow|responsive)\b/i;
+
+    // Separate into mobile and desktop candidates
+    const mobileFrames: typeof frames = [];
+    const desktopFrames: typeof frames = [];
+
+    for (const frame of frames) {
+      const isMobileByWidth = frame.width > 0 && frame.width <= MOBILE_MAX_WIDTH;
+      const isMobileByName = mobilePatterns.test(frame.name);
+      if (isMobileByWidth || isMobileByName) {
+        mobileFrames.push(frame);
+      } else {
+        desktopFrames.push(frame);
+      }
+    }
+
+    // Try to pair each mobile frame with a desktop frame by name similarity
+    const pairedMobile = new Set<string>();
+    const groups: Array<{
+      pageName: string;
+      desktop?: typeof frames[0];
+      mobile?: typeof frames[0];
+      frames: typeof frames;
+    }> = [];
+
+    for (const desktop of desktopFrames) {
+      // Normalize desktop name for matching
+      const desktopBase = desktop.name
+        .replace(/\b(desktop|lg|large|wide|web)\b/gi, '')
+        .replace(/[-_\s]+/g, ' ')
+        .trim()
+        .toLowerCase();
+
+      // Find best matching mobile frame
+      let bestMobile: typeof frames[0] | undefined;
+      let bestScore = 0;
+
+      for (const mobile of mobileFrames) {
+        if (pairedMobile.has(mobile.id)) continue;
+
+        const mobileBase = mobile.name
+          .replace(mobilePatterns, '')
+          .replace(/[-_\s]+/g, ' ')
+          .trim()
+          .toLowerCase();
+
+        // Check for substring match or high similarity
+        if (desktopBase === mobileBase ||
+            desktopBase.includes(mobileBase) ||
+            mobileBase.includes(desktopBase)) {
+          const score = 1;
+          if (score > bestScore) {
+            bestScore = score;
+            bestMobile = mobile;
+          }
+        }
+      }
+
+      if (bestMobile) {
+        pairedMobile.add(bestMobile.id);
+        groups.push({
+          pageName: desktop.name,
+          desktop,
+          mobile: bestMobile,
+          frames: [desktop, bestMobile],
+        });
+      } else {
+        groups.push({
+          pageName: desktop.name,
+          desktop,
+          frames: [desktop],
+        });
+      }
+    }
+
+    // Any unpaired mobile frames become standalone pages
+    for (const mobile of mobileFrames) {
+      if (!pairedMobile.has(mobile.id)) {
+        groups.push({
+          pageName: mobile.name,
+          frames: [mobile],
+        });
+      }
+    }
+
+    return groups;
   }
 
   private formatTokenSummary(tokens: import('../core/types.js').DesignTokens | undefined): string {
@@ -1600,50 +1760,83 @@ class MCPServer {
     targetPct: number;
     refineParams: Record<string, unknown>;
     pencilFile: string;
+    // Responsive variant (optional)
+    mobileNodeTree?: string;
+    mobileNodeIds?: Array<{ id: string; name: string; type: string }>;
+    mobileViewport?: { width: number; height: number };
+    mobileFrameName?: string;
+    desktopFrameName?: string;
   }): string {
     const nodeIdList = opts.nodeIds
       .map(n => `  data-pen-id="${n.id}" → ${n.name} (${n.type})`)
       .join('\n');
 
-    return `You are building a single page from a design specification.
+    const isResponsive = !!(opts.mobileNodeTree && opts.mobileViewport);
 
-## Design: ${opts.frameName}
-Viewport: ${opts.width}×${opts.height}
+    // Build responsive section if mobile variant exists
+    let responsiveSection = '';
+    if (isResponsive) {
+      const mobileNodeIdList = opts.mobileNodeIds!
+        .map(n => `  data-pen-id="${n.id}" → ${n.name} (${n.type})`)
+        .join('\n');
 
-## Design Structure
-${opts.nodeTree}
+      responsiveSection = `
 
-## Design Tokens
-${opts.tokenSummary}
+## Mobile Design (${opts.mobileViewport!.width}×${opts.mobileViewport!.height})
 
-## Build Instructions
-1. Create ${opts.buildDir}/${opts.safeName}${opts.ext}
-2. Add data-pen-id="{nodeId}" to each HTML element matching design nodes
-3. Match colors, spacing, typography, and layout exactly from the design structure above
-4. Use semantic HTML${opts.techStack === 'html' ? ' with CSS (inline or <style> block)' : opts.techStack === 'react' ? ' with React components and CSS modules or styled-components' : ' with Next.js pages and CSS modules'}
-5. Ensure the page renders at ${opts.width}×${opts.height} viewport
+IMPORTANT: The mobile layout is NOT a separate page. It is the responsive version of this same page.
+Use CSS media queries (e.g., \`@media (max-width: ${opts.mobileViewport!.width}px)\`) to adapt the
+layout, spacing, typography, and visibility for smaller screens.
 
-## Node IDs (add as data-pen-id attributes)
-${nodeIdList}
+### Mobile Design Structure
+${opts.mobileNodeTree}
 
-## Step 1: Capture Reference Screenshot
-Before building, capture a pixel-perfect reference image of the design:
-\`\`\`
-get_screenshot({ pencilFile: "${opts.pencilFile}", nodeId: "${opts.nodeIds[0]?.id || 'frameId'}" })
-\`\`\`
-Save the returned screenshot to a file (e.g., ${opts.buildDir}/${opts.safeName}-ref.png).
-This will be used for pixel-accurate comparison during refinement.
+### Mobile Node IDs
+${mobileNodeIdList}
 
-## Step 2: Build the Page
-Create ${opts.buildDir}/${opts.safeName}${opts.ext} with all the design elements listed above.
+### Responsive Implementation Rules
+- Build ONE page file that works at both ${opts.width}px (desktop) and ${opts.mobileViewport!.width}px (mobile)
+- Use \`@media (max-width: ${opts.mobileViewport!.width}px)\` for mobile-specific styles
+- Desktop styles are the default; mobile styles override via media queries
+- Elements that appear in both layouts should use the same data-pen-id
+- Elements that only appear in mobile should be hidden by default and shown in the media query
+- Elements that only appear in desktop should be visible by default and hidden in the media query
+- Flex direction, gaps, padding, font sizes, and layout may all change between breakpoints`;
+    }
 
-## Step 3: Start Dev Server
-Start a local dev server if one isn't already running:
-\`\`\`
-npx serve ${opts.buildDir}
-\`\`\`
+    // Refine instructions differ for responsive pages
+    let refineSteps: string;
+    if (isResponsive) {
+      refineSteps = `## Step 4: Iterate with refine_build (Desktop)
+1. Call refine_build with:
+   ${JSON.stringify(opts.refineParams, null, 2).split('\n').join('\n   ')}
+   Set buildUrl to the URL serving your page (e.g., http://localhost:3000/${opts.safeName}${opts.ext})
+   Set referenceImage to the path of the desktop screenshot you captured in Step 1
+2. Read the mismatches and topFixes in the response
+3. Apply the fixes to your code
+4. Call refine_build again with iteration incremented
+5. Repeat until status="pass" (score ≥ ${opts.targetPct}%)
 
-## Step 4: Iterate with refine_build
+## Step 5: Iterate with refine_build (Mobile)
+After the desktop layout passes, verify the mobile layout:
+1. Capture a mobile reference screenshot:
+   \`\`\`
+   get_screenshot({ pencilFile: "${opts.pencilFile}", nodeId: "${opts.mobileNodeIds?.[0]?.id || 'mobileFrameId'}" })
+   \`\`\`
+2. Call refine_build with:
+   - designSource: { pencilFile: "${opts.pencilFile}", pencilFrame: "${opts.mobileFrameName}" }
+   - viewport: { width: ${opts.mobileViewport!.width}, height: ${opts.mobileViewport!.height} }
+   - buildUrl: same URL as desktop (the page should be responsive)
+   - referenceImage: path to the mobile screenshot
+   - iteration: 1
+3. Apply mobile-specific fixes using media queries — do NOT break the desktop layout
+4. Repeat until the mobile layout also passes (≥ ${opts.targetPct}%)
+5. Re-verify desktop hasn't regressed after mobile fixes
+
+## Step 6: Final Report
+Report both desktop and mobile scores. Both must pass.`;
+    } else {
+      refineSteps = `## Step 4: Iterate with refine_build
 1. Call refine_build with:
    ${JSON.stringify(opts.refineParams, null, 2).split('\n').join('\n   ')}
    Set buildUrl to the URL serving your page (e.g., http://localhost:3000/${opts.safeName}${opts.ext})
@@ -1652,10 +1845,56 @@ npx serve ${opts.buildDir}
 3. Apply the fixes to your code
 4. Call refine_build again with iteration incremented
 5. Repeat until status="pass" (score ≥ ${opts.targetPct}%)
-6. When done, report your final score and any remaining issues
+6. When done, report your final score and any remaining issues`;
+    }
+
+    return `You are building a single ${isResponsive ? 'responsive ' : ''}page from a design specification.
+
+## Design: ${opts.frameName}
+${isResponsive ? `Desktop Viewport: ${opts.width}×${opts.height}\nMobile Viewport: ${opts.mobileViewport!.width}×${opts.mobileViewport!.height}` : `Viewport: ${opts.width}×${opts.height}`}
+
+## ${isResponsive ? 'Desktop ' : ''}Design Structure
+${opts.nodeTree}
+
+## Design Tokens
+${opts.tokenSummary}
+${responsiveSection}
+
+## Build Instructions
+1. Create ${opts.buildDir}/${opts.safeName}${opts.ext}
+2. Add data-pen-id="{nodeId}" to each HTML element matching design nodes
+3. Match colors, spacing, typography, and layout exactly from the design structure above
+4. Use semantic HTML${opts.techStack === 'html' ? ' with CSS (inline or <style> block)' : opts.techStack === 'react' ? ' with React components and CSS modules or styled-components' : ' with Next.js pages and CSS modules'}
+${isResponsive
+  ? `5. Build a SINGLE responsive page — desktop layout is the default, mobile layout uses @media (max-width: ${opts.mobileViewport!.width}px)
+6. Do NOT create separate pages for desktop and mobile`
+  : `5. Ensure the page renders at ${opts.width}×${opts.height} viewport`}
+
+## ${isResponsive ? 'Desktop ' : ''}Node IDs (add as data-pen-id attributes)
+${nodeIdList}
+
+## Step 1: Capture Reference Screenshot${isResponsive ? 's' : ''}
+Before building, capture ${isResponsive ? 'reference images for both viewports' : 'a pixel-perfect reference image of the design'}:
+\`\`\`
+get_screenshot({ pencilFile: "${opts.pencilFile}", nodeId: "${opts.nodeIds[0]?.id || 'frameId'}" })
+\`\`\`
+Save the returned screenshot to a file (e.g., ${opts.buildDir}/${opts.safeName}-ref.png).
+${isResponsive ? `\nAlso capture the mobile reference:\n\`\`\`\nget_screenshot({ pencilFile: "${opts.pencilFile}", nodeId: "${opts.mobileNodeIds?.[0]?.id || 'mobileFrameId'}" })\n\`\`\`\nSave to ${opts.buildDir}/${opts.safeName}-mobile-ref.png.` : ''}
+
+## Step 2: Build the Page
+Create ${opts.buildDir}/${opts.safeName}${opts.ext} with all the design elements listed above.${isResponsive ? '\nBuild the desktop layout first, then add media queries for the mobile layout.' : ''}
+
+## Step 3: Start Dev Server
+Start a local dev server if one isn't already running:
+\`\`\`
+npx serve ${opts.buildDir}
+\`\`\`
+
+${refineSteps}
 
 ## Tips
 - Focus on matching the design structure first (correct elements, hierarchy, data-pen-id), then refine visual properties (colors, spacing, typography)
+${isResponsive ? '- Get the desktop layout passing first, then layer on mobile media queries\n- When fixing mobile issues, always re-check that desktop hasn\'t regressed\n- Use min-width or max-width media queries consistently — don\'t mix both' : ''}
 - If stalled, read the stallStrategy in refine_build's response for guidance
 - If score is below 80% and stalled, use evaluate_with_vlm for qualitative assessment (requires ANTHROPIC_API_KEY)
 
@@ -1664,18 +1903,31 @@ IMPORTANT: Focus only on this page. Do not modify other pages.`;
 
   private buildOrchestrationPrompt(opts: {
     projectName: string;
-    pages: Array<{ frame: string; viewport: { width: number; height: number }; nodeCount: number }>;
+    pages: Array<{
+      frame: string;
+      viewport: { width: number; height: number };
+      nodeCount: number;
+      mobileViewport?: { width: number; height: number };
+      responsiveVariants?: { desktop: string; mobile: string };
+    }>;
     targetPct: number;
     buildDir: string;
     techStack: string;
   }): string {
     const pageList = opts.pages
-      .map((p, i) => `${i + 1}. "${p.frame}" — ${p.viewport.width}×${p.viewport.height}, ${p.nodeCount} design nodes`)
+      .map((p, i) => {
+        const responsive = p.mobileViewport
+          ? ` (responsive: desktop ${p.viewport.width}×${p.viewport.height} + mobile ${p.mobileViewport.width}×${p.mobileViewport.height})`
+          : ` — ${p.viewport.width}×${p.viewport.height}`;
+        return `${i + 1}. "${p.frame}"${responsive}, ${p.nodeCount} design nodes`;
+      })
       .join('\n');
+
+    const hasResponsive = opts.pages.some(p => p.mobileViewport);
 
     return `## Saccadic Build Plan: ${opts.projectName}
 ${opts.pages.length} pages to build. Target: ${opts.targetPct}% match per page.
-
+${hasResponsive ? `\nNote: Some pages have mobile variants. These are NOT separate pages — each is a single\nresponsive page built with CSS media queries. The sub-agent prompt handles this automatically.\n` : ''}
 ### Setup
 1. Create the build directory: ${opts.buildDir}/
 2. Set up a local dev server to serve the built files (e.g., npx serve ${opts.buildDir})
@@ -1687,11 +1939,11 @@ ${pageList}
 ### Execution Steps
 For each page, spawn a sub-agent (via Task tool) with that page's agentPrompt from the plan.
 Each sub-agent:
-1. Captures a reference screenshot via Pencil MCP get_screenshot (for pixel-accurate comparison)
-2. Builds the HTML/CSS for its page with data-pen-id attributes
+1. Captures reference screenshots via Pencil MCP get_screenshot (desktop${hasResponsive ? ' + mobile' : ''})
+2. Builds the HTML/CSS for its page with data-pen-id attributes${hasResponsive ? '\n   - Responsive pages use media queries, NOT separate files' : ''}
 3. Calls refine_build with the reference screenshot to check accuracy
 4. Applies fixes from the topFixes in the response
-5. Repeats until status="pass" (≥${opts.targetPct}%)
+5. Repeats until status="pass" (≥${opts.targetPct}%)${hasResponsive ? '\n6. For responsive pages: verifies both desktop AND mobile pass' : ''}
 
 ### Parallel Execution
 Launch all ${opts.pages.length} sub-agents simultaneously. Each has a clean context
@@ -1699,7 +1951,7 @@ with only its page's design information — no cross-page context pollution.
 
 ### After All Pages Complete
 1. Collect final scores from each sub-agent
-2. Report per-page results
+2. Report per-page results${hasResponsive ? ' (desktop + mobile scores for responsive pages)' : ''}
 3. If any page didn't reach ${opts.targetPct}%, review its remaining mismatches`;
   }
 
