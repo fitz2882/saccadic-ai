@@ -65,6 +65,29 @@ describe('PencilParser', () => {
       expect(dark.nodes[0].children[0].fills).toEqual([{ type: 'SOLID', color: '#1A1A1A' }]);
     });
 
+    it('handles themed values with missing theme property', () => {
+      const pen = makePenFile(
+        [makeFrame({
+          children: [{
+            type: 'rectangle', id: 'r1', width: 100, height: 50,
+            fill: '$--bg',
+          }],
+        })],
+        {
+          '--bg': {
+            type: 'color',
+            value: [
+              { value: '#FFFFFF', theme: { name: 'Light' } },
+              { value: '#333333' } as any, // no theme property
+            ],
+          },
+        }
+      );
+      // Should not throw "Cannot convert undefined or null to object"
+      const result = parser.parse(pen, { themeMode: 'Light' });
+      expect(result.nodes[0].children[0].fills).toEqual([{ type: 'SOLID', color: '#FFFFFF' }]);
+    });
+
     it('uses first themed value when no theme matches', () => {
       const pen = makePenFile(
         [makeFrame({

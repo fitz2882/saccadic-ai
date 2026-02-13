@@ -116,7 +116,7 @@ export class PencilParser {
       // Themed values — find matching theme or use first
       if (themeMode) {
         const match = variable.value.find(tv =>
-          Object.values(tv.theme).some(v => v === themeMode)
+          tv.theme && Object.values(tv.theme).some(v => v === themeMode)
         );
         if (match) return match.value;
       }
@@ -491,6 +491,16 @@ export class PencilParser {
       lineHeight: lineHeightMultiplier * fontSize,
       letterSpacing: node.letterSpacing,
     };
+  }
+
+  /**
+   * Extract design tokens from a parsed .pen file.
+   * Public entry point that resolves variables first, then delegates to extractTokens.
+   */
+  extractTokensFromFile(penData: PenFile, themeMode?: string): DesignTokens | undefined {
+    this.variables.clear();
+    this.resolveVariables(penData.variables, themeMode);
+    return this.extractTokens(penData.variables);
   }
 
   // ── Token Extraction ──

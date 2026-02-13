@@ -85,6 +85,21 @@ export class DOMComparator {
     const usedDesignNodes = new Set<string>();
     const usedDomSelectors = new Set<string>();
 
+    // Pass 0: Exact penId match (data-pen-id attribute to designNode.id or .name)
+    for (const domElement of domStyles) {
+      if (!domElement.penId) continue;
+
+      for (const designNode of designNodes) {
+        if (usedDesignNodes.has(designNode.id)) continue;
+        if (domElement.penId === designNode.id || domElement.penId === designNode.name) {
+          matches.push({ domElement, designNode, confidence: 1.0 });
+          usedDesignNodes.add(designNode.id);
+          usedDomSelectors.add(domElement.selector);
+          break;
+        }
+      }
+    }
+
     // Pass 1: Strong IoU matches (> 0.5)
     for (const domElement of domStyles) {
       let bestMatch: ElementMatch | null = null;

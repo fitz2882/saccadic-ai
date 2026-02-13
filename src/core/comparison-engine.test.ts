@@ -49,6 +49,7 @@ describe('FeedbackGenerator', () => {
         totalPixels: 1000,
         diffPixels: 50,
         diffPercentage: 0.05,
+        pixelComparisonRan: true,
       };
 
       const feedback = generator.generate(domDiff, pixelDiff, []);
@@ -84,7 +85,7 @@ describe('FeedbackGenerator', () => {
         extra: [],
       };
 
-      const feedback = generator.generate(domDiff, { totalPixels: 0, diffPixels: 0, diffPercentage: 0 }, []);
+      const feedback = generator.generate(domDiff, { totalPixels: 0, diffPixels: 0, diffPercentage: 0, pixelComparisonRan: false }, []);
 
       expect(feedback[0].severity).toBe('fail');
       expect(feedback[0].element).toBe('.fail');
@@ -100,7 +101,7 @@ describe('FeedbackGenerator', () => {
         extra: ['.extra-div'],
       };
 
-      const feedback = generator.generate(domDiff, { totalPixels: 0, diffPixels: 0, diffPercentage: 0 }, []);
+      const feedback = generator.generate(domDiff, { totalPixels: 0, diffPixels: 0, diffPercentage: 0, pixelComparisonRan: false }, []);
 
       expect(feedback).toHaveLength(2);
       expect(feedback[0].severity).toBe('fail');
@@ -134,7 +135,7 @@ describe('FeedbackGenerator', () => {
 
       const feedback = generator.generate(
         { matches: 0, mismatches: [], missing: [], extra: [] },
-        { totalPixels: 0, diffPixels: 0, diffPercentage: 0 },
+        { totalPixels: 0, diffPixels: 0, diffPercentage: 0, pixelComparisonRan: false },
         [region],
         domStyles
       );
@@ -153,7 +154,7 @@ describe('FeedbackGenerator', () => {
           summary: '',
         },
         domDiff: { matches: 10, mismatches: [], missing: [], extra: [] },
-        pixelDiff: { totalPixels: 1000, diffPixels: 0, diffPercentage: 0 },
+        pixelDiff: { totalPixels: 1000, diffPixels: 0, diffPercentage: 0, pixelComparisonRan: true },
         regions: [],
         feedback: [],
         timestamp: Date.now(),
@@ -187,7 +188,7 @@ describe('FeedbackGenerator', () => {
           missing: ['.icon'],
           extra: [],
         },
-        pixelDiff: { totalPixels: 1000, diffPixels: 50, diffPercentage: 0.05 },
+        pixelDiff: { totalPixels: 1000, diffPixels: 50, diffPercentage: 0.05, pixelComparisonRan: true },
         regions: [
           {
             bounds: { x: 0, y: 0, width: 10, height: 10 },
@@ -210,6 +211,45 @@ describe('FeedbackGenerator', () => {
       expect(summary).toContain('Grade B');
       expect(summary).toContain('3 issues found');
       expect(summary).toContain('color');
+    });
+
+    it('should NOT say "Perfect match!" when grade is not A even with no feedback', () => {
+      const result: ComparisonResult = {
+        overall: {
+          matchPercentage: 0.3,
+          grade: 'F',
+          summary: '',
+        },
+        domDiff: { matches: 0, mismatches: [], missing: [], extra: [] },
+        pixelDiff: { totalPixels: 0, diffPixels: 0, diffPercentage: 0, pixelComparisonRan: false },
+        regions: [],
+        feedback: [],
+        timestamp: Date.now(),
+      };
+
+      const summary = generator.generateSummary(result);
+
+      expect(summary).not.toContain('Perfect match!');
+      expect(summary).toContain('Some discrepancies detected.');
+    });
+
+    it('should say "Perfect match!" only when grade is A and no feedback', () => {
+      const result: ComparisonResult = {
+        overall: {
+          matchPercentage: 1.0,
+          grade: 'A',
+          summary: '',
+        },
+        domDiff: { matches: 10, mismatches: [], missing: [], extra: [] },
+        pixelDiff: { totalPixels: 1000, diffPixels: 0, diffPercentage: 0, pixelComparisonRan: true },
+        regions: [],
+        feedback: [],
+        timestamp: Date.now(),
+      };
+
+      const summary = generator.generateSummary(result);
+
+      expect(summary).toContain('Perfect match!');
     });
   });
 
@@ -292,6 +332,7 @@ describe('ComparisonEngine', () => {
         totalPixels: 1000,
         diffPixels: 0,
         diffPercentage: 0,
+        pixelComparisonRan: true,
       };
 
       // Access private method via type assertion
@@ -328,6 +369,7 @@ describe('ComparisonEngine', () => {
         totalPixels: 1000,
         diffPixels: 30,
         diffPercentage: 0.03,
+        pixelComparisonRan: true,
       };
 
       const score = (engine as any).computeOverallScore(domDiff, pixelDiff, []);
@@ -371,6 +413,7 @@ describe('ComparisonEngine', () => {
         totalPixels: 1000,
         diffPixels: 100,
         diffPercentage: 0.1,
+        pixelComparisonRan: true,
       };
 
       const score = (engine as any).computeOverallScore(domDiff, pixelDiff, []);
@@ -414,6 +457,7 @@ describe('ComparisonEngine', () => {
         totalPixels: 1000,
         diffPixels: 500,
         diffPercentage: 0.5,
+        pixelComparisonRan: true,
       };
 
       const score = (engine as any).computeOverallScore(domDiff, pixelDiff, []);
@@ -435,6 +479,7 @@ describe('ComparisonEngine', () => {
         totalPixels: 1000,
         diffPixels: 300,
         diffPercentage: 0.3,
+        pixelComparisonRan: true,
       };
 
       // Poor DOM match, perfect pixel match
@@ -457,6 +502,7 @@ describe('ComparisonEngine', () => {
         totalPixels: 1000,
         diffPixels: 0,
         diffPercentage: 0,
+        pixelComparisonRan: true,
       };
 
       const score1 = (engine as any).computeOverallScore(domDiff1, pixelDiff1, []);

@@ -335,8 +335,10 @@ export class FeedbackGenerator {
     // Build summary
     let summary = `Match: ${percentage}% (Grade ${overall.grade}).`;
 
-    if (failCount === 0 && warnCount === 0) {
+    if (failCount === 0 && warnCount === 0 && overall.grade === 'A') {
       summary += ' Perfect match!';
+    } else if (failCount === 0 && warnCount === 0) {
+      summary += ' Some discrepancies detected.';
     } else {
       const totalIssues = failCount + warnCount;
       summary += ` ${totalIssues} issue${totalIssues === 1 ? '' : 's'} found`;

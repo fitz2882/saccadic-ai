@@ -163,7 +163,8 @@ export class ScreenshotEngine {
           }
         }
         const selector = id || (classes ? tagName + classes : tagName + ':nth-of-type(' + nthChild + ')');
-        styles.push({ selector, tagName, bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, computedStyles });
+        const penId = element.getAttribute('data-pen-id') || undefined;
+        styles.push({ selector, tagName, bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, computedStyles, penId: penId });
       });
       return styles;
     `) as () => DOMElementStyle[];

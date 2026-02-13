@@ -161,6 +161,7 @@ export interface DOMElementStyle {
   tagName: string;
   bounds: Bounds;
   computedStyles: Record<string, string>;
+  penId?: string;
 }
 
 export interface ElementBounds {
@@ -284,6 +285,7 @@ export interface PixelDiffResult {
   diffPixels: number;
   diffPercentage: number;
   diffImage?: Buffer;
+  pixelComparisonRan: boolean;
 }
 
 export interface DiffRegion {
@@ -312,6 +314,7 @@ export interface CaptureScreenshotParams {
   viewport?: string | Viewport;
   selector?: string;
   fullPage?: boolean;
+  outputPath?: string;
 }
 
 export interface LoadDesignParams {
@@ -341,6 +344,9 @@ export interface GetDesignTokensParams {
   figmaUrl?: string;
   figmaFileKey?: string;
   tokenFile?: string;
+  pencilFile?: string;
+  pencilFrame?: string;
+  pencilTheme?: string;
 }
 
 export interface CompareDesignTokensParams {

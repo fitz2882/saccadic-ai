@@ -100,6 +100,7 @@ describe('CLI Output Formatting', () => {
         totalPixels: 1000000,
         diffPixels: 50000,
         diffPercentage: 5.0,
+        pixelComparisonRan: true,
       },
       regions: [],
       feedback: [
@@ -143,6 +144,7 @@ describe('CLI Output Formatting', () => {
         totalPixels: 1000000,
         diffPixels: 5000,
         diffPercentage: 0.5,
+        pixelComparisonRan: true,
       },
       regions: [],
       feedback: [],

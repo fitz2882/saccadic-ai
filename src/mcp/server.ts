@@ -97,6 +97,10 @@ const TOOLS = [
           type: 'boolean',
           description: 'Capture full page scroll height',
         },
+        outputPath: {
+          type: 'string',
+          description: 'File path to save the screenshot PNG to disk',
+        },
       },
       required: ['url'],
     },
@@ -210,7 +214,7 @@ const TOOLS = [
   },
   {
     name: 'get_design_tokens',
-    description: 'Extract structured design tokens from Figma or token file',
+    description: 'Extract structured design tokens from Figma, token file, or Pencil.dev .pen file',
     inputSchema: {
       type: 'object',
       properties: {
@@ -225,6 +229,18 @@ const TOOLS = [
         tokenFile: {
           type: 'string',
           description: 'Path to local design token file',
+        },
+        pencilFile: {
+          type: 'string',
+          description: 'Path to Pencil.dev .pen design file',
+        },
+        pencilFrame: {
+          type: 'string',
+          description: 'Frame name/id to extract from .pen file',
+        },
+        pencilTheme: {
+          type: 'string',
+          description: 'Theme mode for .pen file (e.g., "Light", "Dark")',
         },
       },
     },
@@ -441,6 +457,16 @@ class MCPServer {
 
     const base64Image = result.image.toString('base64');
 
+    // Write to disk if outputPath is provided
+    let filePath: string | undefined;
+    if (params.outputPath) {
+      const fs = await import('fs/promises');
+      const path = await import('path');
+      const resolved = path.resolve(params.outputPath);
+      await fs.writeFile(resolved, result.image);
+      filePath = resolved;
+    }
+
     return {
       content: [
         {
@@ -452,6 +478,7 @@ class MCPServer {
               selector: result.selector,
               timestamp: result.timestamp,
               domElementCount: result.domStyles?.length || 0,
+              ...(filePath ? { filePath } : {}),
             },
             null,
             2
@@ -586,6 +613,7 @@ class MCPServer {
               totalPixels: result.pixelDiff.totalPixels,
               diffPixels: result.pixelDiff.diffPixels,
               diffPercentage: result.pixelDiff.diffPercentage,
+              pixelComparisonRan: result.pixelDiff.pixelComparisonRan,
             },
             regionCount: result.regions.length,
             feedback: result.feedback,
@@ -668,7 +696,15 @@ class MCPServer {
     const designParser = this.getDesignParser();
 
     let tokens;
-    if (params.tokenFile) {
+    if (params.pencilFile) {
+      const fs = await import('fs/promises');
+      const content = await fs.readFile(params.pencilFile, 'utf-8');
+      const parser = new PencilParser();
+      tokens = parser.extractTokensFromFile(JSON.parse(content), params.pencilTheme);
+      if (!tokens) {
+        tokens = { colors: {}, spacing: {}, typography: {}, shadows: {}, borders: {}, radii: {} };
+      }
+    } else if (params.tokenFile) {
       tokens = await designParser.parseFromTokenFile(params.tokenFile);
     } else if (params.figmaUrl) {
       const fileKeyMatch = params.figmaUrl.match(/file\/([a-zA-Z0-9]+)/);
@@ -684,7 +720,7 @@ class MCPServer {
     } else {
       throw {
         code: ErrorCode.InvalidParams,
-        message: 'Must provide figmaUrl, figmaFileKey, or tokenFile',
+        message: 'Must provide figmaUrl, figmaFileKey, pencilFile, or tokenFile',
       };
     }
 
@@ -731,7 +767,10 @@ class MCPServer {
     if (!vlm.isAvailable()) {
       throw {
         code: ErrorCode.InternalError,
-        message: 'VLM evaluation requires ANTHROPIC_API_KEY environment variable',
+        message:
+          'VLM evaluation requires ANTHROPIC_API_KEY. ' +
+          'Set it in your MCP server config env block: { "env": { "ANTHROPIC_API_KEY": "sk-ant-..." } } ' +
+          'or export it in your shell: export ANTHROPIC_API_KEY=sk-ant-...',
       };
     }
 

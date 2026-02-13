@@ -133,6 +133,7 @@ export class ComparisonEngine {
         totalPixels: 0,
         diffPixels: 0,
         diffPercentage: 0,
+        pixelComparisonRan: false,
       };
     }
 
@@ -238,8 +239,11 @@ export class ComparisonEngine {
     const warnCount = domDiff.mismatches.filter((m) => m.severity === 'warn').length +
       regions.filter((r) => r.severity === 'warn').length;
 
-    // Weighted average: DOM 70%, Pixel 30%
-    const matchPercentage = domMatchRate * 0.7 + pixelMatchRate * 0.3;
+    // When pixel comparison didn't run, use DOM-only score to avoid
+    // inflating the result with a phantom 30% perfect pixel score
+    const matchPercentage = pixelDiff.pixelComparisonRan
+      ? domMatchRate * 0.7 + pixelMatchRate * 0.3
+      : domMatchRate;
 
     // Grade based on match percentage
     // Apply severity penalties: each 'fail' mismatch reduces score

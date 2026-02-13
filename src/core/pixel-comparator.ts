@@ -88,6 +88,7 @@ export class PixelComparator {
       diffPixels,
       diffPercentage,
       diffImage: diffBuffer,
+      pixelComparisonRan: true,
     };
   }
 
