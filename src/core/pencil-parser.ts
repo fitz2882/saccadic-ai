@@ -86,8 +86,8 @@ export class PencilParser {
       id: 'pencil',
       name: options?.frameName || penData.version || 'Pencil Design',
       viewport: {
-        width: Math.max(maxWidth, 1280),
-        height: Math.max(maxHeight, 800),
+        width: maxWidth || 1280,
+        height: maxHeight || 800,
       },
       nodes: designNodes,
       tokens,
@@ -274,13 +274,10 @@ export class PencilParser {
     let width = this.resolveSize(node.width, parentContentWidth);
     let height = this.resolveSize(node.height, parentContentHeight);
 
-    // For text nodes, estimate size if not explicit
+    // For text nodes, estimate height if not explicit (width left as 0 for auto/fill)
     if (node.type === 'text') {
       const fontSize = typeof node.fontSize === 'number' ? node.fontSize : 16;
       const lineHeight = node.lineHeight ?? 1.2;
-      if (width === 0 && node.content) {
-        width = node.content.length * fontSize * 0.55;
-      }
       if (height === 0) {
         height = fontSize * lineHeight;
       }

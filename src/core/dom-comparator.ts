@@ -28,6 +28,13 @@ const IGNORED_TAGS = new Set([
   'HTML', 'HEAD', 'BODY', 'META', 'TITLE', 'LINK', 'SCRIPT', 'STYLE', 'NOSCRIPT', 'BR', 'HR',
 ]);
 
+/** SVG internal elements that are implementation details, not design nodes. */
+const SVG_INTERNAL_TAGS = new Set([
+  'PATH', 'CIRCLE', 'LINE', 'RECT', 'ELLIPSE', 'POLYGON', 'POLYLINE',
+  'G', 'DEFS', 'CLIPPATH', 'MASK', 'USE', 'SYMBOL', 'TSPAN', 'TEXTPATH',
+  'LINEARGRADIENT', 'RADIALGRADIENT', 'STOP', 'FILTER',
+]);
+
 /**
  * DOMComparator class - compares DOM computed styles against design state.
  */
@@ -196,9 +203,9 @@ export class DOMComparator {
    * Compare DOM computed styles against design nodes.
    */
   compare(domStyles: DOMElementStyle[], designNodes: DesignNode[]): DOMDiffResult {
-    // Filter out structural/meta elements that are not meaningful for comparison
+    // Filter out structural/meta elements and SVG internals
     const filteredDomStyles = domStyles.filter(
-      (s) => !IGNORED_TAGS.has(s.tagName.toUpperCase())
+      (s) => !IGNORED_TAGS.has(s.tagName.toUpperCase()) && !SVG_INTERNAL_TAGS.has(s.tagName.toUpperCase())
     );
 
     // Flatten design node tree for matching (#10)
@@ -971,12 +978,12 @@ export class DOMComparator {
       return value.toUpperCase();
     }
 
-    // RGB or RGBA
-    const rgbMatch = value.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*[\d.]+)?\)/);
+    // RGB or RGBA (handles decimal values like rgb(59.5, 130.2, 246.8))
+    const rgbMatch = value.match(/rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)(?:,\s*[\d.]+)?\)/);
     if (rgbMatch) {
-      const r = parseInt(rgbMatch[1], 10);
-      const g = parseInt(rgbMatch[2], 10);
-      const b = parseInt(rgbMatch[3], 10);
+      const r = Math.round(parseFloat(rgbMatch[1]));
+      const g = Math.round(parseFloat(rgbMatch[2]));
+      const b = Math.round(parseFloat(rgbMatch[3]));
       return `#${this.toHex(r)}${this.toHex(g)}${this.toHex(b)}`;
     }
 
@@ -1063,7 +1070,11 @@ export class DOMComparator {
       case 'INSTANCE': return frameTags.has(tag) ? 1.0 : 0.3;
       case 'INPUT':
       case 'BUTTON': return inputTags.has(tag) ? 1.0 : 0;
-      case 'IMAGE': return imageTags.has(tag) ? 1.0 : 0;
+      case 'VECTOR': {
+        const vectorTags = new Set(['svg', 'path', 'circle', 'line', 'polygon', 'polyline', 'rect', 'ellipse', 'i', 'span']);
+        return vectorTags.has(tag) ? 1.0 : 0;
+      }
+      case 'IMAGE': return (imageTags.has(tag) && tag !== 'svg') ? 1.0 : 0;
       case 'RECTANGLE': return frameTags.has(tag) ? 0.5 : 0.2;
       default: return 0.2;
     }
