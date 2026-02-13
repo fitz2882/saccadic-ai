@@ -17,6 +17,7 @@ import { FeedbackGenerator } from './feedback-generator.js';
 import { SSIMComparator } from './ssim-comparator.js';
 import { VLMComparator } from './vlm-comparator.js';
 import { PencilParser } from './pencil-parser.js';
+import { DesignRenderer } from './design-renderer.js';
 import type {
   ComparisonResult,
   OverallScore,
@@ -111,11 +112,38 @@ export class ComparisonEngine {
     let pixelDiff: PixelDiffResult;
     let regions: DiffRegion[] = [];
 
+    let referenceBuffer: Buffer | null = null;
+
     if (options.designSource.referenceImage) {
-      // Compare against reference image
-      const referenceBuffer = await this.loadReferenceImage(
-        options.designSource.referenceImage
-      );
+      referenceBuffer = await this.loadReferenceImage(options.designSource.referenceImage);
+    } else if (designState.nodes.length > 0) {
+      // Auto-generate reference screenshot from design state
+      try {
+        const renderer = new DesignRenderer();
+        const html = renderer.render(
+          designState.nodes,
+          designState.viewport.width,
+          designState.viewport.height
+        );
+        const fs = await import('fs/promises');
+        const path = await import('path');
+        const os = await import('os');
+        const tmpPath = path.join(os.tmpdir(), `saccadic-design-${Date.now()}.html`);
+        await fs.writeFile(tmpPath, html, 'utf-8');
+        const refScreenshot = await this.screenshotEngine.capture({
+          url: `file://${tmpPath}`,
+          viewport: options.viewport || designState.viewport,
+          disableAnimations: true,
+        });
+        referenceBuffer = refScreenshot.image;
+        await fs.unlink(tmpPath).catch(() => {});
+      } catch {
+        // Fall back to no pixel comparison if rendering fails
+        referenceBuffer = null;
+      }
+    }
+
+    if (referenceBuffer) {
       const pixelResult = this.pixelComparator.compare(
         referenceBuffer,
         screenshotResult.image,
@@ -128,7 +156,6 @@ export class ComparisonEngine {
         regions = this.pixelComparator.findDiffRegions(pixelResult.diffImage, png.width, png.height);
       }
     } else {
-      // No reference image, use design state bounds for region detection
       pixelDiff = {
         totalPixels: 0,
         diffPixels: 0,
@@ -139,19 +166,13 @@ export class ComparisonEngine {
 
     // 5. SSIM (optional, requires reference image)
     let mlMetrics: MLMetrics | undefined;
-    if (options.enableSSIM && options.designSource.referenceImage) {
-      const referenceBuffer = await this.loadReferenceImage(
-        options.designSource.referenceImage
-      );
+    if (options.enableSSIM && referenceBuffer) {
       mlMetrics = this.ssimComparator.compare(referenceBuffer, screenshotResult.image);
     }
 
     // 6. VLM evaluation (optional, requires API key)
     let vlmEvaluation: VLMEvaluation | undefined;
-    if (options.enableVLM && options.designSource.referenceImage && this.vlmComparator.isAvailable()) {
-      const referenceBuffer = await this.loadReferenceImage(
-        options.designSource.referenceImage
-      );
+    if (options.enableVLM && referenceBuffer && this.vlmComparator.isAvailable()) {
       vlmEvaluation = await this.vlmComparator.compare({
         designImage: referenceBuffer,
         buildImage: screenshotResult.image,

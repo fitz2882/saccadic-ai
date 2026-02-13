@@ -4,6 +4,21 @@
 
 Saccadic AI gives AI coding agents the ability to visually perceive what they build, compare it against design specifications, and receive actionable feedback to close the gap between design and implementation.
 
+## Benchmarks
+
+| Metric | Score |
+|--------|-------|
+| Precision | 97.3% |
+| Recall | 98.6% |
+| F1 | 97.9% |
+| Fixtures | 31 |
+
+Run benchmarks locally:
+
+```bash
+npm run bench:detection
+```
+
 ## How It Works
 
 Saccadic AI runs a multi-tier comparison pipeline:

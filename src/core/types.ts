@@ -26,6 +26,7 @@ export interface DesignNode {
   gap?: number;
   layoutMode?: 'HORIZONTAL' | 'VERTICAL' | 'NONE';
   children: DesignNode[];
+  textContent?: string;
 }
 
 export type NodeType =
@@ -162,6 +163,7 @@ export interface DOMElementStyle {
   bounds: Bounds;
   computedStyles: Record<string, string>;
   penId?: string;
+  textContent?: string;
 }
 
 export interface ElementBounds {

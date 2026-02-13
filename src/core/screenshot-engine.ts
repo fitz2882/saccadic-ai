@@ -164,7 +164,14 @@ export class ScreenshotEngine {
         }
         const selector = id || (classes ? tagName + classes : tagName + ':nth-of-type(' + nthChild + ')');
         const penId = element.getAttribute('data-pen-id') || undefined;
-        styles.push({ selector, tagName, bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, computedStyles, penId: penId });
+        var directText = '';
+        for (var ci = 0; ci < element.childNodes.length; ci++) {
+          if (element.childNodes[ci].nodeType === 3) {
+            directText += element.childNodes[ci].textContent;
+          }
+        }
+        directText = directText.trim();
+        styles.push({ selector, tagName, bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, computedStyles, penId: penId, textContent: directText || undefined });
       });
       return styles;
     `) as () => DOMElementStyle[];

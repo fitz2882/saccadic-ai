@@ -120,7 +120,72 @@ export class DOMComparator {
       }
     }
 
-    // Pass 2: Fallback — match remaining nodes by ID/name/selector similarity + partial IoU
+    // Pass 2: Text content matching — strongest signal for text elements
+    for (const designNode of designNodes) {
+      if (usedDesignNodes.has(designNode.id)) continue;
+      if (designNode.type !== 'TEXT' || !designNode.textContent) continue;
+
+      let bestMatch: ElementMatch | null = null;
+      let bestIoU = -1;
+
+      for (const domElement of domStyles) {
+        if (usedDomSelectors.has(domElement.selector)) continue;
+        if (!domElement.textContent) continue;
+
+        // Exact or substring text match
+        const designText = designNode.textContent.trim().toLowerCase();
+        const domText = domElement.textContent.trim().toLowerCase();
+        if (!designText || !domText) continue;
+        if (designText === domText || domText.includes(designText) || designText.includes(domText)) {
+          const iou = this.calculateIoU(domElement.bounds, designNode.bounds);
+          if (iou > bestIoU) {
+            bestIoU = iou;
+            bestMatch = { domElement, designNode, confidence: 0.85 };
+          }
+        }
+      }
+
+      if (bestMatch) {
+        matches.push(bestMatch);
+        usedDesignNodes.add(designNode.id);
+        usedDomSelectors.add(bestMatch.domElement.selector);
+      }
+    }
+
+    // Pass 3: Type + visual similarity scoring
+    for (const designNode of designNodes) {
+      if (usedDesignNodes.has(designNode.id)) continue;
+
+      let bestMatch: ElementMatch | null = null;
+      let bestScore = 0;
+
+      for (const domElement of domStyles) {
+        if (usedDomSelectors.has(domElement.selector)) continue;
+
+        const iou = this.calculateIoU(domElement.bounds, designNode.bounds);
+        // Require at least some spatial proximity
+        if (iou === 0) continue;
+
+        const typeScore = this.typeCompatibility(designNode.type, domElement.tagName) || 0;
+        const colorScore = this.colorSimilarity(designNode, domElement) || 0;
+        const sizeScore = this.sizeSimilarity(designNode.bounds, domElement.bounds) || 0;
+
+        const score = typeScore * 0.3 + colorScore * 0.25 + sizeScore * 0.25 + Math.min(iou * 2, 1) * 0.2;
+
+        if (!isNaN(score) && score > 0.4 && score > bestScore) {
+          bestScore = score;
+          bestMatch = { domElement, designNode, confidence: score };
+        }
+      }
+
+      if (bestMatch) {
+        matches.push(bestMatch);
+        usedDesignNodes.add(designNode.id);
+        usedDomSelectors.add(bestMatch.domElement.selector);
+      }
+    }
+
+    // Pass 4: Fallback — match remaining nodes by ID/name/selector similarity + partial IoU
     for (const designNode of designNodes) {
       if (usedDesignNodes.has(designNode.id)) continue;
 
@@ -707,6 +772,75 @@ export class DOMComparator {
       // top, right, bottom, left
       return { top: parts[0], right: parts[1], bottom: parts[2], left: parts[3] };
     }
+  }
+
+  /**
+   * Check type compatibility between a design node type and a DOM tag.
+   * Returns 0-1 score.
+   */
+  private typeCompatibility(designType: string, tagName: string): number {
+    const tag = tagName.toLowerCase();
+    const textTags = new Set(['p', 'span', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'a', 'label', 'li', 'td', 'th', 'strong', 'em', 'b', 'i', 'small']);
+    const frameTags = new Set(['div', 'section', 'nav', 'header', 'footer', 'main', 'aside', 'article', 'ul', 'ol', 'table', 'form']);
+    const inputTags = new Set(['input', 'textarea', 'select', 'button']);
+    const imageTags = new Set(['img', 'svg', 'picture', 'canvas', 'video']);
+
+    switch (designType) {
+      case 'TEXT': return textTags.has(tag) ? 1.0 : 0;
+      case 'FRAME':
+      case 'GROUP':
+      case 'COMPONENT':
+      case 'INSTANCE': return frameTags.has(tag) ? 1.0 : 0.3;
+      case 'INPUT':
+      case 'BUTTON': return inputTags.has(tag) ? 1.0 : 0;
+      case 'IMAGE': return imageTags.has(tag) ? 1.0 : 0;
+      case 'RECTANGLE': return frameTags.has(tag) ? 0.5 : 0.2;
+      default: return 0.2;
+    }
+  }
+
+  /**
+   * Compare colors between a design node and a DOM element.
+   * Returns 0-1 similarity score.
+   */
+  private colorSimilarity(designNode: DesignNode, domElement: DOMElementStyle): number {
+    // Get design color (fill or text color)
+    let designColor: string | undefined;
+    if (designNode.fills?.[0]?.color) {
+      designColor = designNode.fills[0].color;
+    } else if (designNode.typography?.color) {
+      designColor = designNode.typography.color;
+    }
+    if (!designColor) return 0.5; // neutral when no design color
+
+    // Get DOM color
+    const domBgColor = this.parseColor(domElement.computedStyles.backgroundColor);
+    const domTextColor = this.parseColor(domElement.computedStyles.color);
+
+    let bestSimilarity = 0;
+    if (domBgColor) {
+      const deltaE = this.pixelComparator.computeDeltaE(designColor.toUpperCase(), domBgColor.toUpperCase());
+      bestSimilarity = Math.max(bestSimilarity, Math.max(0, 1 - deltaE / 50));
+    }
+    if (domTextColor) {
+      const deltaE = this.pixelComparator.computeDeltaE(designColor.toUpperCase(), domTextColor.toUpperCase());
+      bestSimilarity = Math.max(bestSimilarity, Math.max(0, 1 - deltaE / 50));
+    }
+
+    return bestSimilarity;
+  }
+
+  /**
+   * Compare sizes between design bounds and DOM bounds.
+   * Returns 0-1 similarity score.
+   */
+  private sizeSimilarity(designBounds: Bounds, domBounds: Bounds): number {
+    if (designBounds.width === 0 || designBounds.height === 0) return 0;
+
+    const widthRatio = Math.min(designBounds.width, domBounds.width) / Math.max(designBounds.width, domBounds.width);
+    const heightRatio = Math.min(designBounds.height, domBounds.height) / Math.max(designBounds.height, domBounds.height);
+
+    return (widthRatio + heightRatio) / 2;
   }
 
   /**

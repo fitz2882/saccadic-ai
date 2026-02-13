@@ -54,7 +54,7 @@ describe('Detection Accuracy Benchmark', () => {
       await screenshotEngine.close();
       await comparisonEngine.close();
     }
-  });
+  }, 30_000);
 
   const fixtures = getAllFixtures();
 

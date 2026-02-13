@@ -107,7 +107,7 @@ const TOOLS = [
   },
   {
     name: 'load_design',
-    description: 'Parse a Figma design file, token file, or Pencil.dev .pen file into design state',
+    description: 'Parse a Figma design file, token file, or Pencil.dev .pen file into design state. Returns design node IDs. Add data-pen-id attributes to build HTML for accurate DOM comparison.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -144,7 +144,7 @@ const TOOLS = [
   },
   {
     name: 'compare_design_build',
-    description: 'Run full comparison pipeline between design and build implementation',
+    description: 'Run full comparison pipeline between design and build implementation. For best results, add data-pen-id attributes to build elements matching design node IDs from load_design.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -546,6 +546,19 @@ class MCPServer {
       };
     }
 
+    // Flatten design nodes to extract all IDs for data-pen-id annotation
+    const flattenNodeIds = (nodes: typeof design.nodes): string[] => {
+      const ids: string[] = [];
+      for (const node of nodes) {
+        ids.push(node.id);
+        if (node.children?.length) {
+          ids.push(...flattenNodeIds(node.children));
+        }
+      }
+      return ids;
+    };
+    const nodeIds = flattenNodeIds(design.nodes);
+
     return {
       content: [
         {
@@ -557,6 +570,8 @@ class MCPServer {
               viewport: design.viewport,
               nodeCount: design.nodes.length,
               hasTokens: !!design.tokens,
+              nodeIds,
+              instructions: 'Add data-pen-id="{nodeId}" to each corresponding HTML element for accurate comparison. For example: <div data-pen-id="navHome">',
             },
             null,
             2

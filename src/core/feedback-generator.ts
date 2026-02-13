@@ -32,35 +32,47 @@ export class FeedbackGenerator {
   ): FeedbackItem[] {
     const feedback: FeedbackItem[] = [];
 
-    // 1. DOM mismatches
-    for (const mismatch of domDiff.mismatches) {
-      feedback.push({
-        severity: mismatch.severity,
-        category: this.categorizeProperty(mismatch.property),
-        message: `${mismatch.element}: ${mismatch.property} mismatch. Expected "${mismatch.expected}", got "${mismatch.actual}".`,
-        element: mismatch.element,
-        fix: mismatch.fix,
-      });
-    }
+    // Detect zero-match pattern: no matches but many missing/extra elements
+    const isZeroMatch = domDiff.matches === 0 && domDiff.missing.length > 0;
 
-    // 2. Missing elements
-    for (const selector of domDiff.missing) {
+    if (isZeroMatch) {
+      // Replace flood of individual missing/extra items with a single actionable message
       feedback.push({
         severity: 'fail',
         category: 'missing',
-        message: `Missing element: ${selector}`,
-        element: selector,
+        message: `DOM comparison found 0 matches between ${domDiff.missing.length} design nodes and ${domDiff.extra.length} DOM elements. Add data-pen-id attributes to your HTML elements matching the design node IDs (e.g. data-pen-id="navHome") to enable accurate comparison.`,
       });
-    }
+    } else {
+      // 1. DOM mismatches
+      for (const mismatch of domDiff.mismatches) {
+        feedback.push({
+          severity: mismatch.severity,
+          category: this.categorizeProperty(mismatch.property),
+          message: `${mismatch.element}: ${mismatch.property} mismatch. Expected "${mismatch.expected}", got "${mismatch.actual}".`,
+          element: mismatch.element,
+          fix: mismatch.fix,
+        });
+      }
 
-    // 3. Extra elements
-    for (const selector of domDiff.extra) {
-      feedback.push({
-        severity: 'warn',
-        category: 'extra',
-        message: `Extra element found: ${selector}`,
-        element: selector,
-      });
+      // 2. Missing elements
+      for (const selector of domDiff.missing) {
+        feedback.push({
+          severity: 'fail',
+          category: 'missing',
+          message: `Missing element: ${selector}`,
+          element: selector,
+        });
+      }
+
+      // 3. Extra elements
+      for (const selector of domDiff.extra) {
+        feedback.push({
+          severity: 'warn',
+          category: 'extra',
+          message: `Extra element found: ${selector}`,
+          element: selector,
+        });
+      }
     }
 
     // 4. Pixel diff regions (deduplicate against DOM feedback)

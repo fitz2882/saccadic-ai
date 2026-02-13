@@ -440,6 +440,7 @@ export class PencilParser {
 
     if (fills && fills.length > 0) designNode.fills = fills;
     if (typography) designNode.typography = typography;
+    if (node.content) designNode.textContent = node.content;
     if (padding.top || padding.right || padding.bottom || padding.left) {
       designNode.padding = padding;
     }
