@@ -132,6 +132,15 @@ class AgentPromptBuilder {
       buf.writeln('Repeat with incrementing `iteration` until `status` is `"pass"`.');
       buf.writeln('Capture a reference screenshot first via Pencil MCP `get_screenshot`');
       buf.writeln('and pass it as `referenceImage` for pixel-accurate comparison.');
+      buf.writeln();
+      buf.writeln('**Hot reload**: Save code changes before calling refine_build. '
+          'Saccadic automatically hot reloads the Flutter app on iteration 2+. '
+          'If hot reload fails, the response will tell you to reload manually.');
+      buf.writeln();
+      buf.writeln('**Context management**: Run this entire refine loop inside a '
+          'sub-agent to avoid consuming the main conversation\'s context. '
+          'The refine loop can take 5-15 iterations, each generating large '
+          'tool responses.');
     } else {
       buf.writeln('After building, run:');
       buf.writeln('```bash');

@@ -77,11 +77,33 @@ get_screenshot({ pencilFile: "design.pen", nodeId: "frameId" })
 
 Then pass it to refine_build as `referenceImage`. Without this, saccadic generates an approximation from the design state which is less accurate.
 
+### Hot Reload
+
+Saccadic automatically hot reloads the Flutter app before each comparison (iteration 2+). The flow:
+
+1. Agent modifies Flutter code and saves to disk
+2. Agent calls `refine_build` with `iteration: N`
+3. Saccadic calls `reloadSources` + `ext.flutter.reassemble` on the VM service
+4. Widget tree rebuilds with new code, then comparison runs
+
+If hot reload fails (e.g., app is in release mode), the response includes `hotReloaded: false` and instructions to reload manually. Hot reload only works in **debug mode** (JIT compilation).
+
+### Context Management
+
+Each refine iteration generates large tool responses. To avoid running out of context:
+
+- **Spawn a sub-agent per page** — each gets its own fresh context window
+- The sub-agent runs the full refine loop until `status="pass"` or max iterations
+- Only the final result summary returns to the main conversation
+- For multi-page designs, run sub-agents in parallel
+
+The `plan_build` orchestration prompt includes these instructions automatically.
+
 ## Development
 
 ```bash
 cd saccadic
-dart test          # Run all tests (69 tests)
+dart test          # Run all tests (109 tests)
 dart analyze       # 0 issues expected
 dart compile exe bin/saccadic_mcp.dart -o saccadic-mcp  # Build MCP server
 ```

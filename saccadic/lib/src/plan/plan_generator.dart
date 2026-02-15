@@ -172,6 +172,26 @@ class PlanGenerator {
     buf.writeln('2. Use the design tree structure to build the widget hierarchy');
     buf.writeln('3. Run `saccadic refine` after each build iteration');
     buf.writeln('4. Target: Grade A (95%+ match)');
+    buf.writeln();
+    buf.writeln('## Context Management (IMPORTANT)');
+    buf.writeln();
+    buf.writeln('Each page\'s refine loop consumes significant context. '
+        'To avoid running out of context mid-iteration:');
+    buf.writeln();
+    buf.writeln('- **Spawn a sub-agent per page** — each sub-agent gets its own '
+        'fresh context window, isolated from the main conversation.');
+    buf.writeln('- The sub-agent runs the full refine loop (build → refine_build → '
+        'fix → refine_build → ...) until status="pass" or max iterations.');
+    buf.writeln('- Only the final result summary returns to the main conversation.');
+    buf.writeln('- For multi-page designs, run sub-agents in parallel.');
+    buf.writeln();
+    buf.writeln('## Hot Reload');
+    buf.writeln();
+    buf.writeln('Saccadic automatically hot reloads the Flutter app before each '
+        'comparison (iteration 2+). Save your code changes to disk before '
+        'calling refine_build — the tool will inject the updated code and '
+        'rebuild the widget tree. If automatic hot reload fails, the response '
+        'will include instructions to reload manually.');
     return buf.toString();
   }
 }

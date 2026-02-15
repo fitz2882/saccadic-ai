@@ -308,6 +308,20 @@ class SaccadicMcpServer {
           }
         }
 
+        // Hot reload the Flutter app to pick up code changes.
+        // On iteration 1, skip (no changes yet). On subsequent iterations,
+        // the agent has modified code and we need to reload before comparing.
+        var hotReloadSuccess = false;
+        if (iteration > 1) {
+          _inspector ??= FlutterInspector();
+          try {
+            await _inspector!.connect(flutterUrl);
+            hotReloadSuccess = await _inspector!.hotReload();
+          } catch (e) {
+            stderr.writeln('[saccadic] Hot reload attempt failed: $e');
+          }
+        }
+
         // Run comparison
         _engine ??= ComparisonEngine();
         final result = await _engine!.compare(CompareOptions(
@@ -456,7 +470,17 @@ class SaccadicMcpServer {
               'call refine_build again with iteration=${iteration + 1}.';
           recommendation = stalled
               ? stallStrategy
-              : 'Apply the fixes below, then call refine_build again.';
+              : 'Apply the fixes below, save the file, then call refine_build '
+                  'again. Saccadic will hot reload the app automatically.';
+        }
+
+        // If hot reload was attempted but failed, add a note
+        if (iteration > 1 && !hotReloadSuccess) {
+          recommendation +=
+              ' NOTE: Automatic hot reload failed — please hot reload or '
+              'hot restart the Flutter app manually before the next iteration '
+              '(press "r" in the terminal running `flutter run`, or use '
+              'your IDE\'s hot reload button).';
         }
 
         // Pencil reference image hint
@@ -473,6 +497,7 @@ class SaccadicMcpServer {
           'grade': currentGrade,
           'targetScore': '${(targetScore * 100).round()}%',
           'stalled': stalled,
+          if (iteration > 1) 'hotReloaded': hotReloadSuccess,
           'message': message,
           'recommendation': recommendation,
           'scoreBreakdown': scoreBreakdown,

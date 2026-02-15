@@ -328,6 +328,51 @@ class FlutterInspector {
     return const Viewport(width: 1280, height: 800);
   }
 
+  /// Trigger a hot reload on the connected Flutter app.
+  ///
+  /// Hot reload injects updated source code into the running Dart VM
+  /// and rebuilds the widget tree without losing state. This is the
+  /// two-step process:
+  ///   1. `reloadSources` — inject updated code into the VM
+  ///   2. `ext.flutter.reassemble` — rebuild the widget tree
+  ///
+  /// Only works in debug mode (JIT compilation). Profile and release
+  /// builds use AOT compilation and cannot hot reload.
+  ///
+  /// Returns true if the reload succeeded, false otherwise.
+  Future<bool> hotReload() async {
+    _ensureConnected();
+
+    try {
+      final report = await _service!.reloadSources(_isolateId!);
+      final success = report.success ?? false;
+      if (!success) {
+        stderr.writeln(
+          '[saccadic] Hot reload failed: source injection unsuccessful.',
+        );
+        return false;
+      }
+
+      // Brief delay for VM to process injected code
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+
+      // Rebuild widget tree
+      await _service!.callServiceExtension(
+        'ext.flutter.reassemble',
+        isolateId: _isolateId,
+      );
+
+      // Allow widget tree to settle after reassembly
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+
+      stderr.writeln('[saccadic] Hot reload succeeded.');
+      return true;
+    } catch (e) {
+      stderr.writeln('[saccadic] Hot reload failed: $e');
+      return false;
+    }
+  }
+
   /// Disconnect from the VM service.
   Future<void> disconnect() async {
     await _service?.dispose();
