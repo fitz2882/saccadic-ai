@@ -185,6 +185,18 @@ class PlanGenerator {
     buf.writeln('- Only the final result summary returns to the main conversation.');
     buf.writeln('- For multi-page designs, run sub-agents in parallel.');
     buf.writeln();
+    buf.writeln('## Tab Navigation');
+    buf.writeln();
+    buf.writeln('If the app uses a BottomNavigationBar or NavigationBar, '
+        'each page may be on a different tab. Pass `tabIndex` to '
+        '`refine_build` so saccadic can automatically tap the correct tab '
+        'before comparing. Example: if "Learn" is tab 0, "Scenarios" is '
+        'tab 1, "Progress" is tab 2, set `tabIndex: 0` for the Learn page.');
+    buf.writeln();
+    buf.writeln('Saccadic detects the navigation bar in the widget tree and '
+        'dispatches a tap at the correct tab position. If auto-detection '
+        'fails, also pass `tabCount` explicitly.');
+    buf.writeln();
     buf.writeln('## Hot Reload');
     buf.writeln();
     buf.writeln('Saccadic automatically hot reloads the Flutter app before each '

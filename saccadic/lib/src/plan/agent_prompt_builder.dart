@@ -133,6 +133,10 @@ class AgentPromptBuilder {
       buf.writeln('Capture a reference screenshot first via Pencil MCP `get_screenshot`');
       buf.writeln('and pass it as `referenceImage` for pixel-accurate comparison.');
       buf.writeln();
+      buf.writeln('**Tab navigation**: If this page is behind a BottomNavigationBar, '
+          'pass `tabIndex` (zero-based) so saccadic taps the correct tab '
+          'before comparing. Also pass `tabCount` if auto-detection fails.');
+      buf.writeln();
       buf.writeln('**Hot reload**: Save code changes before calling refine_build. '
           'Saccadic automatically hot reloads the Flutter app on iteration 2+. '
           'If hot reload fails, the response will tell you to reload manually.');

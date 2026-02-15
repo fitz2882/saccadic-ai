@@ -78,19 +78,25 @@ class PencilParser {
         .toList();
 
     // Phase 5: DesignNode conversion
-    final designNodes = computed.expand(_toDesignNodes).toList();
+    // Normalize coordinates to be frame-relative: subtract the frame's
+    // canvas origin so nodes start at (0,0) like Flutter's local coords.
+    final designNodes = computed.expand((frame) {
+      return _toDesignNodes(frame, frame.absX, frame.absY);
+    }).toList();
 
     // Extract tokens
     final tokens = _extractTokens(penData.variables);
 
-    // Compute viewport from top-level frame bounds
+    // Compute viewport from frame dimensions (not canvas positions).
+    // For single-frame targets, use the frame's own size.
+    // For multi-frame canvases, use the largest frame dimensions.
     final maxW = computed.fold<double>(
       0,
-      (m, n) => math.max(m, n.absX + n.computedWidth),
+      (m, n) => math.max(m, n.computedWidth),
     );
     final maxH = computed.fold<double>(
       0,
-      (m, n) => math.max(m, n.absY + n.computedHeight),
+      (m, n) => math.max(m, n.computedHeight),
     );
 
     return DesignState(
@@ -426,11 +432,15 @@ class PencilParser {
 
   // ── Phase 5: DesignNode Conversion ──
 
-  List<DesignNode> _toDesignNodes(_ComputedNode node) {
+  List<DesignNode> _toDesignNodes(
+    _ComputedNode node,
+    double frameOriginX,
+    double frameOriginY,
+  ) {
     final type = _mapNodeType(node.source.type);
     final bounds = Bounds(
-      x: node.absX,
-      y: node.absY,
+      x: node.absX - frameOriginX,
+      y: node.absY - frameOriginY,
       width: node.computedWidth,
       height: node.computedHeight,
     );
@@ -439,7 +449,9 @@ class PencilParser {
     final padding = _normalizePadding(node.source.padding);
     final typography = _parseTypography(node.source);
 
-    final children = node.computedChildren.expand(_toDesignNodes).toList();
+    final children = node.computedChildren
+        .expand((c) => _toDesignNodes(c, frameOriginX, frameOriginY))
+        .toList();
 
     LayoutMode? layoutMode;
     if (node.source.layout == 'vertical') {

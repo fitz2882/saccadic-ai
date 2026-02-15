@@ -270,6 +270,18 @@ class SaccadicMcpServer {
           'maxIterations': JsonSchema.number(
             description: 'Maximum iterations before stop (default: 10)',
           ),
+          'tabIndex': JsonSchema.number(
+            description:
+                'Zero-based tab index to navigate to before comparing. '
+                'Use when the target page is behind a BottomNavigationBar '
+                'or NavigationBar. Saccadic will tap the specified tab to '
+                'make the page visible before running the comparison.',
+          ),
+          'tabCount': JsonSchema.number(
+            description:
+                'Total number of tabs in the navigation bar. '
+                'Auto-detected from widget tree if omitted.',
+          ),
         },
         required: ['designSource', 'flutterUrl'],
       ),
@@ -281,6 +293,8 @@ class SaccadicMcpServer {
         final targetGrade = args['targetGrade'] as String? ?? 'A';
         final iteration = (args['iteration'] as num?)?.toInt() ?? 1;
         final maxIterations = (args['maxIterations'] as num?)?.toInt() ?? 10;
+        final tabIndex = (args['tabIndex'] as num?)?.toInt();
+        final tabCount = (args['tabCount'] as num?)?.toInt();
 
         final gradeThresholds = {'A': 0.95, 'B': 0.85, 'C': 0.7};
         final targetScore =
@@ -319,6 +333,39 @@ class SaccadicMcpServer {
             hotReloadSuccess = await _inspector!.hotReload();
           } catch (e) {
             stderr.writeln('[saccadic] Hot reload attempt failed: $e');
+          }
+        }
+
+        // Navigate to the target tab if specified.
+        // This lets sub-agents compare pages behind a BottomNavigationBar
+        // without requiring the user to manually switch tabs.
+        var tabNavigated = false;
+        if (tabIndex != null) {
+          _inspector ??= FlutterInspector();
+          try {
+            if (!_inspector!.isConnected) {
+              await _inspector!.connect(flutterUrl);
+            }
+
+            // Get viewport dimensions from a screenshot for tap position
+            final screenshot = await _inspector!.captureScreenshot();
+            final viewport = _viewportFromScreenshot(screenshot);
+
+            tabNavigated = await _inspector!.navigateToTab(
+              tabIndex,
+              tabCount: tabCount,
+              viewportWidth: viewport.width.toDouble(),
+              viewportHeight: viewport.height.toDouble(),
+            );
+
+            if (!tabNavigated) {
+              stderr.writeln(
+                '[saccadic] Tab navigation to index $tabIndex failed. '
+                'The comparison will run on the currently visible page.',
+              );
+            }
+          } catch (e) {
+            stderr.writeln('[saccadic] Tab navigation attempt failed: $e');
           }
         }
 
@@ -483,6 +530,15 @@ class SaccadicMcpServer {
               'your IDE\'s hot reload button).';
         }
 
+        // Tab navigation failure hint
+        if (tabIndex != null && !tabNavigated) {
+          recommendation +=
+              ' NOTE: Tab navigation to index $tabIndex failed — '
+              'the comparison ran on the currently visible page. '
+              'Please switch to the correct tab manually, or verify '
+              'the tabIndex and tabCount parameters.';
+        }
+
         // Pencil reference image hint
         if (pencilFile != null && referenceImage == null) {
           recommendation +=
@@ -498,6 +554,7 @@ class SaccadicMcpServer {
           'targetScore': '${(targetScore * 100).round()}%',
           'stalled': stalled,
           if (iteration > 1) 'hotReloaded': hotReloadSuccess,
+          if (tabIndex != null) 'tabNavigated': tabNavigated,
           'message': message,
           'recommendation': recommendation,
           'scoreBreakdown': scoreBreakdown,
@@ -1072,6 +1129,32 @@ class SaccadicMcpServer {
       );
     }
     return null;
+  }
+
+  /// Extract viewport dimensions from screenshot PNG bytes.
+  Viewport _viewportFromScreenshot(Uint8List pngBytes) {
+    try {
+      // Import image package for PNG decoding is already available
+      // through the flutter_inspector, but we need it here too.
+      // Use a simple PNG header parse for width/height.
+      if (pngBytes.length > 24) {
+        // PNG IHDR chunk starts at byte 16, width at 16-19, height at 20-23
+        final width = (pngBytes[16] << 24) |
+            (pngBytes[17] << 16) |
+            (pngBytes[18] << 8) |
+            pngBytes[19];
+        final height = (pngBytes[20] << 24) |
+            (pngBytes[21] << 16) |
+            (pngBytes[22] << 8) |
+            pngBytes[23];
+        if (width > 0 && height > 0) {
+          return Viewport(width: width, height: height);
+        }
+      }
+    } catch (_) {
+      // Fall through to default
+    }
+    return const Viewport(width: 375, height: 812);
   }
 
   Future<Uint8List> _loadImage(String imageData) async {

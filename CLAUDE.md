@@ -77,6 +77,21 @@ get_screenshot({ pencilFile: "design.pen", nodeId: "frameId" })
 
 Then pass it to refine_build as `referenceImage`. Without this, saccadic generates an approximation from the design state which is less accurate.
 
+### Tab Navigation
+
+For apps with a `BottomNavigationBar` or `NavigationBar`, saccadic can automatically switch tabs before comparing. Pass `tabIndex` (zero-based) to `refine_build`:
+
+```json
+{
+  "designSource": { "pencilFile": "design.pen", "pencilFrame": "Learn" },
+  "flutterUrl": "ws://127.0.0.1:PORT/ws",
+  "tabIndex": 0,
+  "iteration": 1
+}
+```
+
+Saccadic finds the navigation bar in the widget tree, computes the tab position, and dispatches a tap via the VM service. Pass `tabCount` if auto-detection fails.
+
 ### Hot Reload
 
 Saccadic automatically hot reloads the Flutter app before each comparison (iteration 2+). The flow:
@@ -103,7 +118,7 @@ The `plan_build` orchestration prompt includes these instructions automatically.
 
 ```bash
 cd saccadic
-dart test          # Run all tests (109 tests)
+dart test          # Run all tests (114 tests)
 dart analyze       # 0 issues expected
 dart compile exe bin/saccadic_mcp.dart -o saccadic-mcp  # Build MCP server
 ```

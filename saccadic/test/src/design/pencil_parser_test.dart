@@ -141,6 +141,88 @@ void main() {
       expect(btnInstance.children.first.textContent, 'Click me');
     });
 
+    test('normalizes coordinates to frame-relative', () {
+      // Simulate a .pen canvas where a mobile frame is placed at x=1500, y=200
+      // (common when mobile and desktop frames sit side-by-side on canvas).
+      // All child coordinates should be relative to the frame origin, not the canvas.
+      final penData = PenFile(
+        version: '1.0',
+        children: [
+          PenNode(
+            type: 'frame',
+            id: 'mobileFrame',
+            name: 'Mobile',
+            x: 1500,
+            y: 200,
+            width: 375,
+            height: 812,
+            layout: 'vertical',
+            padding: 16,
+            children: [
+              PenNode(
+                type: 'text',
+                id: 'header',
+                name: 'Header',
+                content: 'Welcome',
+                fontSize: 24,
+              ),
+              PenNode(
+                type: 'frame',
+                id: 'card',
+                name: 'Card',
+                width: 'fill_container',
+                height: 100,
+                children: [
+                  PenNode(
+                    type: 'text',
+                    id: 'cardText',
+                    name: 'CardText',
+                    content: 'Details',
+                    fontSize: 14,
+                    x: 8,
+                    y: 8,
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ],
+      );
+
+      final state = parser.parse(
+        penData,
+        const PencilParseOptions(frameName: 'Mobile'),
+      );
+
+      // Frame itself should be at (0, 0) — not (1500, 200)
+      final frame = state.nodes.first;
+      expect(frame.bounds.x, equals(0));
+      expect(frame.bounds.y, equals(0));
+      expect(frame.bounds.width, equals(375));
+      expect(frame.bounds.height, equals(812));
+
+      // Header text should be at padding offset — not 1500+16
+      final header = frame.children[0];
+      expect(header.bounds.x, equals(16)); // padding only
+      expect(header.bounds.y, equals(16)); // padding only
+
+      // Card should be at padding offset + header height + gap
+      final card = frame.children[1];
+      expect(card.bounds.x, equals(16));
+      // y = padding(16) + header height (24*1.2=28.8) — frame-relative
+      expect(card.bounds.y, greaterThan(16));
+      expect(card.bounds.y, lessThan(100)); // not 200+padding
+
+      // Nested text inside card should be relative to frame, not canvas
+      final cardText = card.children.first;
+      expect(cardText.bounds.x, lessThan(100)); // not 1500+
+      expect(cardText.bounds.y, lessThan(200)); // not 200+
+
+      // Viewport should be frame dimensions, not canvas extent
+      expect(state.viewport.width, equals(375));
+      expect(state.viewport.height, equals(812));
+    });
+
     test('resolves variables', () {
       final penData = PenFile(
         version: '1.0',

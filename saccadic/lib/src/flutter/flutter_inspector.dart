@@ -62,6 +62,17 @@ class FlutterInspectionResult {
   });
 }
 
+/// Info about a navigation bar found in the widget tree.
+class NavBarInfo {
+  /// The widget type (e.g., 'BottomNavigationBar', 'NavigationBar').
+  final String type;
+
+  /// The number of tab items detected.
+  final int tabCount;
+
+  const NavBarInfo({required this.type, required this.tabCount});
+}
+
 /// Connects to a running Flutter app's VM service.
 class FlutterInspector {
   VmService? _service;
@@ -88,6 +99,9 @@ class FlutterInspector {
       throw StateError('No isolate found in Flutter VM');
     }
   }
+
+  /// Whether the inspector is currently connected to a VM service.
+  bool get isConnected => _service != null && _isolateId != null;
 
   /// The WebSocket URI used to connect (needed for flutter screenshot fallback).
   String? _wsUri;
@@ -326,6 +340,206 @@ class FlutterInspector {
     }
     // Fallback if PNG decoding fails
     return const Viewport(width: 1280, height: 800);
+  }
+
+  /// Navigate to a specific tab in the app's bottom navigation bar.
+  ///
+  /// Finds `BottomNavigationBar`, `NavigationBar`, or `CupertinoTabBar` in
+  /// the widget tree, computes the center position of the target tab, and
+  /// dispatches pointer events via VM service `evaluate()` to simulate a tap.
+  ///
+  /// Parameters:
+  /// - [tabIndex]: zero-based index of the tab to navigate to
+  /// - [tabCount]: total number of tabs (auto-detected from widget tree if omitted)
+  /// - [viewportWidth]: logical width of the app viewport (default: 375)
+  /// - [viewportHeight]: logical height of the app viewport (default: 812)
+  ///
+  /// Returns true if navigation succeeded.
+  Future<bool> navigateToTab(
+    int tabIndex, {
+    int? tabCount,
+    double viewportWidth = 375,
+    double viewportHeight = 812,
+  }) async {
+    _ensureConnected();
+
+    try {
+      // Fetch the widget tree to find the navigation bar
+      final rootNode = await _fetchRootWidgetNode();
+      if (rootNode == null) {
+        stderr.writeln(
+          '[saccadic] Cannot get widget tree for tab navigation.',
+        );
+        return false;
+      }
+
+      // Find the nav bar and detect tab count
+      final navInfo = _findNavBarInfoImpl(rootNode);
+      final effectiveTabCount = tabCount ?? navInfo?.tabCount;
+
+      if (effectiveTabCount == null || effectiveTabCount < 2) {
+        stderr.writeln(
+          '[saccadic] Could not determine tab count. '
+          '${navInfo == null ? "No navigation bar found in widget tree." : "Found ${navInfo.type} but could not count tabs."} '
+          'Pass tabCount parameter explicitly.',
+        );
+        return false;
+      }
+
+      if (tabIndex < 0 || tabIndex >= effectiveTabCount) {
+        stderr.writeln(
+          '[saccadic] Tab index $tabIndex out of range '
+          '(0-${effectiveTabCount - 1}).',
+        );
+        return false;
+      }
+
+      // Nav bar height: NavigationBar (M3) is ~80px, BottomNavigationBar ~56px
+      final navBarHeight =
+          navInfo?.type == 'NavigationBar' ? 80.0 : 56.0;
+
+      // Compute tap position: center of the target tab
+      final tabWidth = viewportWidth / effectiveTabCount;
+      final tapX = (tabIndex * tabWidth) + (tabWidth / 2);
+      final tapY = viewportHeight - (navBarHeight / 2);
+
+      stderr.writeln(
+        '[saccadic] Tapping tab $tabIndex at ($tapX, $tapY) '
+        '— ${navInfo?.type ?? "unknown"} with $effectiveTabCount tabs.',
+      );
+
+      final tapped = await _dispatchTap(tapX, tapY);
+      if (tapped) {
+        // Wait for navigation animation to complete
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+        stderr.writeln('[saccadic] Navigated to tab $tabIndex.');
+      }
+      return tapped;
+    } catch (e) {
+      stderr.writeln('[saccadic] Tab navigation failed: $e');
+      return false;
+    }
+  }
+
+  /// Fetch the raw root widget tree node from the VM service.
+  Future<Map<String, dynamic>?> _fetchRootWidgetNode() async {
+    try {
+      final response = await _service!.callServiceExtension(
+        'ext.flutter.inspector.getRootWidgetTree',
+        isolateId: _isolateId,
+        args: {
+          'objectGroup': 'saccadic-nav',
+          'isSummaryTree': 'true',
+        },
+      );
+      return _parseTreeResponse(response);
+    } catch (_) {
+      // Fallback to summary tree
+    }
+
+    try {
+      final response = await _service!.callServiceExtension(
+        'ext.flutter.inspector.getRootWidgetSummaryTree',
+        isolateId: _isolateId,
+        args: {'objectGroup': 'saccadic-nav'},
+      );
+      return _parseTreeResponse(response);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Find a navigation bar in the widget tree and count its tabs.
+  ///
+  /// Searches for `BottomNavigationBar`, `NavigationBar`, or
+  /// `CupertinoTabBar` and counts child tab items.
+  ///
+  /// Exposed as static for testability — does not require a VM connection.
+  static NavBarInfo? findNavBarInfo(Map<String, dynamic> node) =>
+      _findNavBarInfoImpl(node);
+
+  static NavBarInfo? _findNavBarInfoImpl(Map<String, dynamic> node) {
+    final widgetType = node['widgetRuntimeType'] as String? ??
+        node['description'] as String? ??
+        '';
+
+    // Check for navigation bar widget types
+    const navBarTypes = {
+      'BottomNavigationBar',
+      'NavigationBar',
+      'CupertinoTabBar',
+    };
+
+    if (navBarTypes.contains(widgetType)) {
+      final children = node['children'] as List<dynamic>? ?? [];
+
+      // Count recognized tab item types
+      var tabCount = 0;
+      for (final child in children) {
+        if (child is! Map<String, dynamic>) continue;
+        final childType = child['widgetRuntimeType'] as String? ??
+            child['description'] as String? ??
+            '';
+        if (childType.contains('NavigationDestination') ||
+            childType.contains('BottomNavigationBarItem') ||
+            childType.contains('NavigationBarItem') ||
+            childType.contains('TabBarItem')) {
+          tabCount++;
+        }
+      }
+
+      // Fallback: count all direct children if no recognized types found
+      if (tabCount == 0 && children.isNotEmpty) {
+        tabCount = children.length;
+      }
+
+      return NavBarInfo(type: widgetType, tabCount: tabCount);
+    }
+
+    // Recurse into children
+    final children = node['children'] as List<dynamic>?;
+    if (children != null) {
+      for (final child in children) {
+        if (child is Map<String, dynamic>) {
+          final result = _findNavBarInfoImpl(child);
+          if (result != null) return result;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  /// Dispatch a tap at screen position (x, y) using VM service evaluate.
+  ///
+  /// Evaluates a Dart expression in the app's root library to dispatch
+  /// `PointerDownEvent` + `PointerUpEvent` through the gesture binding.
+  Future<bool> _dispatchTap(double x, double y) async {
+    try {
+      final isolate = await _service!.getIsolate(_isolateId!);
+      final rootLibId = isolate.rootLib?.id;
+      if (rootLibId == null) {
+        stderr.writeln('[saccadic] Cannot find root library for evaluate.');
+        return false;
+      }
+
+      // Use GestureBinding.instance which has handlePointerEvent.
+      // These types are available in any library that imports
+      // package:flutter/material.dart (which re-exports gestures.dart).
+      final expression = '(() { '
+          'GestureBinding.instance!.handlePointerEvent('
+          'PointerDownEvent(position: Offset($x, $y), pointer: 99)); '
+          'GestureBinding.instance!.handlePointerEvent('
+          'PointerUpEvent(position: Offset($x, $y), pointer: 99)); '
+          'return "ok"; '
+          '})()';
+
+      await _service!.evaluate(_isolateId!, rootLibId, expression);
+      return true;
+    } catch (e) {
+      stderr.writeln('[saccadic] Tap dispatch via evaluate failed: $e');
+      return false;
+    }
   }
 
   /// Trigger a hot reload on the connected Flutter app.
