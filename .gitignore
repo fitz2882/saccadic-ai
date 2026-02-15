@@ -1,9 +1,20 @@
-node_modules/
-dist/
-.pm/
-coverage/
-*.tgz
+# Dart
+.dart_tool/
+.packages
+pubspec.lock
+build/
+
+# IDE
+.idea/
+*.iml
+
+# OS
+.DS_Store
+
+# Compiled binaries
+saccadic-mcp
+saccadic-cli
+
+# Env
 .env
 .env.*
-.DS_Store
-bench-results/

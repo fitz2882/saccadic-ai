@@ -1,0 +1,19 @@
+name: saccadic
+description: Visual comparison tool for Flutter apps — compare .pen/Figma designs against running Flutter builds.
+version: 0.1.0
+
+environment:
+  sdk: ^3.4.0
+
+dependencies:
+  args: ^2.5.0
+  http: ^1.2.0
+  image: ^4.3.0
+  mcp_dart: ^1.2.2
+  meta: ^1.15.0
+  path: ^1.9.0
+  vm_service: ^14.0.0
+
+dev_dependencies:
+  lints: ^4.0.0
+  test: ^1.25.0

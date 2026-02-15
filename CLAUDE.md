@@ -1,22 +1,21 @@
-# Saccadic AI — Visual Feedback System
+# Saccadic AI — Visual Feedback System for Flutter
 
 ## What This Is
 
-Saccadic AI is an MCP server that provides visual comparison tools for design-to-code workflows. It compares `.pen` design files against built HTML/CSS and provides actionable feedback to reach pixel-accurate builds.
+Saccadic AI is a Dart MCP server that provides visual comparison tools for design-to-Flutter workflows. It compares `.pen`/Figma designs against running Flutter apps and provides actionable feedback to reach pixel-accurate builds.
 
 ## MCP Tools
 
 | Tool | Purpose |
 |------|---------|
-| `plan_build` | Analyze a .pen file and generate a full build plan with per-page agent prompts |
+| `plan_build` | Analyze a .pen/Figma design and generate a full build plan with per-page agent prompts |
 | `refine_build` | Iterative comparison — call repeatedly until score reaches target |
-| `compare_design_build` | One-shot comparison between design and build |
-| `capture_screenshot` | Capture a screenshot of a URL |
-| `load_design` | Parse a design file into structured design state |
+| `compare_design_build` | One-shot comparison between design and running Flutter app |
+| `capture_screenshot` | Capture a screenshot of a running Flutter app via VM service |
+| `load_design` | Parse a .pen or Figma file into structured design state |
 | `get_design_tokens` | Extract design tokens from a .pen or Figma file |
 | `compare_design_tokens` | Diff two sets of design tokens |
 | `get_visual_diff` | Pixel diff between two images |
-| `evaluate_with_vlm` | AI-powered qualitative assessment (requires ANTHROPIC_API_KEY) |
 
 ## Building From a .pen File
 
@@ -28,11 +27,11 @@ Give Claude this prompt to build all pages from a .pen design:
 Build all pages from the design at [path/to/design.pen].
 
 1. Call plan_build({ pencilFile: "[path/to/design.pen]" })
-2. Set up a dev server: npx serve ./build
+2. Start the Flutter app with --observatory-port
 3. For each page in the plan, spawn a parallel sub-agent with that page's agentPrompt
 4. Each sub-agent should:
    a. Capture a reference screenshot via Pencil MCP get_screenshot
-   b. Build the HTML/CSS with data-pen-id attributes matching the design node IDs
+   b. Build the Flutter widget with Key('nodeId') attributes matching the design node IDs
    c. Call refine_build with the reference screenshot until status="pass" (95%+)
 5. Report final scores for all pages when done
 ```
@@ -48,19 +47,22 @@ Build all pages from the design at [path/to/design.pen].
 
 3. Sub-agents iterate with **`refine_build`** which returns:
    - Current score and grade (A/B/C/D/F)
-   - Prioritized fixes with CSS suggestions
+   - Prioritized fixes with Flutter widget suggestions
    - Stall detection and recovery strategies
    - Incremental change tracking between iterations
 
-### data-pen-id Attributes
+### Key('nodeId') Convention
 
-Every HTML element must have a `data-pen-id` attribute matching its design node ID. This is how saccadic matches DOM elements to design nodes:
+Every Flutter widget must have a `Key('nodeId')` matching its design node ID. This is how saccadic matches widgets to design nodes:
 
-```html
-<div data-pen-id="heroSection">
-  <h1 data-pen-id="heroTitle">Welcome</h1>
-  <p data-pen-id="heroSubtitle">Build something amazing</p>
-</div>
+```dart
+Container(
+  key: Key('heroSection'),
+  child: Column(children: [
+    Text('Welcome', key: Key('heroTitle')),
+    Text('Build something amazing', key: Key('heroSubtitle')),
+  ]),
+)
 ```
 
 The node IDs come from the plan_build response (`pages[].nodeIds`).
@@ -75,24 +77,27 @@ get_screenshot({ pencilFile: "design.pen", nodeId: "frameId" })
 
 Then pass it to refine_build as `referenceImage`. Without this, saccadic generates an approximation from the design state which is less accurate.
 
-### Tech Stack Options
-
-```
-plan_build({ pencilFile: "design.pen", techStack: "html" })    // default
-plan_build({ pencilFile: "design.pen", techStack: "react" })
-plan_build({ pencilFile: "design.pen", techStack: "nextjs" })
-```
-
 ## Development
 
 ```bash
-npm test          # Run all tests (217 tests)
-npx tsc --noEmit  # Type check
-npm run build     # Build to dist/
+cd saccadic
+dart test          # Run all tests (69 tests)
+dart analyze       # 0 issues expected
+dart compile exe bin/saccadic_mcp.dart -o saccadic-mcp  # Build MCP server
 ```
 
 ## Architecture
 
-- `src/core/` — Comparison engine, DOM comparator, pixel comparator, screenshot engine, parsers
-- `src/mcp/server.ts` — MCP server (JSON-RPC 2.0 stdio transport)
-- `src/bench/` — Benchmarking harness for A/B testing with/without saccadic feedback
+All code lives in `saccadic/`:
+
+- `lib/src/core/` — Types, thresholds, color science (CIEDE2000)
+- `lib/src/comparison/` — Comparison engine, widget comparator, pixel comparator
+- `lib/src/design/` — Pencil parser (.pen), Figma parser
+- `lib/src/flutter/` — VM service inspector, widget style extraction
+- `lib/src/feedback/` — Feedback generator, cascade suppression, fix suggester
+- `lib/src/scoring/` — Multi-factor scorer
+- `lib/src/plan/` — Build plan generator, agent prompt builder
+- `lib/src/mcp/` — MCP server (8 tools), refine session state
+- `lib/src/cli/` — CLI commands (compare, plan, refine)
+- `bin/saccadic_mcp.dart` — MCP server entry point (stdio)
+- `bin/saccadic.dart` — CLI entry point
