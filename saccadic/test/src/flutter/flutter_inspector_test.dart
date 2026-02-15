@@ -398,308 +398,63 @@ void main() {
     });
   });
 
-  group('collectValueIds', () {
-    test('collects valueId from nodes that have it', () {
-      final tree = _sampleTree();
-      final widgets = <WidgetStyle>[];
-      _walkForTest(tree, widgets, null);
+  group('collectKeyValueIds', () {
+    test('maps keyed widgets to their valueIds', () {
+      final tree = _realisticTree();
+      final keyToValueId = <String, String>{};
+      _collectKeyValueIdsForTest(tree, keyToValueId);
 
-      final valueIdToIndices = <String, List<int>>{};
-      _collectValueIdsForTest(tree, widgets, valueIdToIndices, 0);
-
-      // All 3 nodes in the sample tree have valueIds
-      expect(valueIdToIndices.length, equals(3));
-      expect(valueIdToIndices.containsKey('inspector-0'), isTrue);
-      expect(valueIdToIndices.containsKey('inspector-1'), isTrue);
-      expect(valueIdToIndices.containsKey('inspector-2'), isTrue);
+      // Keyed widgets in the realistic tree
+      expect(keyToValueId['appScaffold'], equals('inspector-0'));
+      expect(keyToValueId['heroSection'], equals('inspector-3'));
+      expect(keyToValueId['heroTitle'], equals('inspector-4'));
+      expect(keyToValueId['heroSubtitle'], equals('inspector-5'));
+      expect(keyToValueId['ctaButton'], equals('inspector-6'));
     });
 
-    test('skips leaf widgets that have no valueId in summary tree', () {
-      // Summary tree: leaf widgets (Text, Icon) don't have valueId.
-      // Only parent/framework widgets tend to have them.
+    test('skips nodes without valueId', () {
       final tree = {
         'description': 'Column',
         'widgetRuntimeType': 'Column',
-        'valueId': 'inspector-1',
-        'children': <dynamic>[
-          {
-            'description': "Text-[<'title'>]",
-            'widgetRuntimeType': 'Text',
-            // No valueId in summary tree — the core problem
-            'children': <dynamic>[],
-          },
-          {
-            'description': 'Icon',
-            'widgetRuntimeType': 'Icon',
-            // No valueId in summary tree
-            'children': <dynamic>[],
-          },
-        ],
-      };
-
-      final widgets = <WidgetStyle>[];
-      _walkForTest(tree, widgets, null);
-
-      final valueIdToIndices = <String, List<int>>{};
-      _collectValueIdsForTest(tree, widgets, valueIdToIndices, 0);
-
-      // Only Column has valueId; Text and Icon are missed
-      // (their bounds must come from _extractKeyedChildBounds instead)
-      expect(valueIdToIndices.length, equals(1));
-      expect(valueIdToIndices.containsKey('inspector-1'), isTrue);
-    });
-  });
-
-  group('extractKeyedChildBounds', () {
-    test('finds keyed children through intermediate framework widgets', () {
-      // Simulate getDetailsSubtree response with subtreeDepth=5.
-      // Keyed Text is nested inside Semantics (intermediate framework widget).
-      final detailTree = {
-        'description': 'Column',
-        'widgetRuntimeType': 'Column',
-        'renderObject': {
-          'description':
-              'RenderFlex#abc ╌ size: Size(375.0, 500.0)',
-        },
-        'children': <dynamic>[
-          {
-            'description': 'Semantics',
-            'widgetRuntimeType': 'Semantics',
-            'children': <dynamic>[
-              {
-                'description': 'Text',
-                'widgetRuntimeType': 'Text',
-                'properties': <dynamic>[
-                  {'name': 'key', 'description': "[<'heroTitle'>]"},
-                ],
-                'renderObject': {
-                  'description':
-                      'RenderParagraph#def ╌ size: Size(300.0, 24.0)',
-                },
-                'children': <dynamic>[],
-              },
-            ],
-          },
-          {
-            'description': 'Icon',
-            'widgetRuntimeType': 'Icon',
-            'properties': <dynamic>[
-              {'name': 'key', 'description': "[<'heroIcon'>]"},
-            ],
-            'renderObject': {
-              'description':
-                  'RenderSemanticsAnnotations#ghi ╌ size: Size(48.0, 48.0)',
-            },
-            'children': <dynamic>[],
-          },
-        ],
-      };
-
-      // Widgets from summary tree walk — all have zero bounds
-      final widgets = [
-        _makeWidget(key: 'heroTitle', type: 'Text'),
-        _makeWidget(key: 'heroIcon', type: 'Icon'),
-        _makeWidget(key: 'otherWidget', type: 'Container'),
-      ];
-
-      final keyToIndex = <String, int>{
-        'heroTitle': 0,
-        'heroIcon': 1,
-        'otherWidget': 2,
-      };
-
-      _extractKeyedChildBoundsForTest(detailTree, widgets, keyToIndex);
-
-      // heroTitle found through Semantics → Text
-      expect(widgets[0].bounds.width, equals(300.0));
-      expect(widgets[0].bounds.height, equals(24.0));
-      // heroIcon found as direct child
-      expect(widgets[1].bounds.width, equals(48.0));
-      expect(widgets[1].bounds.height, equals(48.0));
-      // otherWidget not in detail tree — stays at 0
-      expect(widgets[2].bounds.width, equals(0));
-      expect(widgets[2].bounds.height, equals(0));
-    });
-
-    test('handles deeply nested keyed widgets', () {
-      // 4 levels deep: Column → Padding → Semantics → DefaultTextStyle → Text
-      final detailTree = {
-        'description': 'Column',
-        'widgetRuntimeType': 'Column',
-        'children': <dynamic>[
-          {
-            'description': 'Padding',
-            'widgetRuntimeType': 'Padding',
-            'children': <dynamic>[
-              {
-                'description': 'Semantics',
-                'widgetRuntimeType': 'Semantics',
-                'children': <dynamic>[
-                  {
-                    'description': 'DefaultTextStyle',
-                    'widgetRuntimeType': 'DefaultTextStyle',
-                    'children': <dynamic>[
-                      {
-                        'description': 'Text',
-                        'widgetRuntimeType': 'Text',
-                        'properties': <dynamic>[
-                          {
-                            'name': 'key',
-                            'description': "[<'deepText'>]",
-                          },
-                        ],
-                        'renderObject': {
-                          'description':
-                              'RenderParagraph#x ╌ size: Size(150.0, 18.0)',
-                        },
-                        'children': <dynamic>[],
-                      },
-                    ],
-                  },
-                ],
-              },
-            ],
-          },
-        ],
-      };
-
-      final widgets = [_makeWidget(key: 'deepText', type: 'Text')];
-      final keyToIndex = <String, int>{'deepText': 0};
-
-      _extractKeyedChildBoundsForTest(detailTree, widgets, keyToIndex);
-
-      expect(widgets[0].bounds.width, equals(150.0));
-      expect(widgets[0].bounds.height, equals(18.0));
-    });
-
-    test('uses description fallback when renderObject is absent', () {
-      // Detail node is a render object itself — size is in own description
-      final detailTree = {
-        'description': 'Column',
-        'widgetRuntimeType': 'Column',
-        'children': <dynamic>[
-          {
-            'description':
-                'RenderParagraph#abc ╌ size: Size(250.0, 20.0)',
-            'widgetRuntimeType': 'Text',
-            'properties': <dynamic>[
-              {'name': 'key', 'description': "[<'renderText'>]"},
-            ],
-            // No renderObject key — the node itself IS the render object
-            'children': <dynamic>[],
-          },
-        ],
-      };
-
-      final widgets = [_makeWidget(key: 'renderText', type: 'Text')];
-      final keyToIndex = <String, int>{'renderText': 0};
-
-      _extractKeyedChildBoundsForTest(detailTree, widgets, keyToIndex);
-
-      expect(widgets[0].bounds.width, equals(250.0));
-      expect(widgets[0].bounds.height, equals(20.0));
-    });
-
-    test('stops updating once all keyed widgets are found', () {
-      final detailTree = {
-        'description': 'Column',
-        'widgetRuntimeType': 'Column',
-        'children': <dynamic>[
-          {
-            'description': 'Text',
-            'widgetRuntimeType': 'Text',
-            'properties': <dynamic>[
-              {'name': 'key', 'description': "[<'onlyWidget'>]"},
-            ],
-            'renderObject': {
-              'description': 'RenderParagraph ╌ size: Size(100.0, 16.0)',
-            },
-            'children': <dynamic>[],
-          },
-        ],
-      };
-
-      final widgets = [_makeWidget(key: 'onlyWidget', type: 'Text')];
-      final keyToIndex = <String, int>{'onlyWidget': 0};
-
-      _extractKeyedChildBoundsForTest(detailTree, widgets, keyToIndex);
-
-      expect(widgets[0].bounds.width, equals(100.0));
-      // keyToIndex should be empty (entry removed after match)
-      expect(keyToIndex, isEmpty);
-    });
-  });
-
-  group('end-to-end bounds resolution', () {
-    test('subtreeDepth finds keyed children in parent detail tree', () {
-      // Secondary strategy: when renderObject.valueId isn't available,
-      // subtreeDepth=5 on parent nodes discovers children via key matching.
-      final summaryTree = {
-        'description': 'Column',
-        'widgetRuntimeType': 'Column',
-        'valueId': 'inspector-1',
+        // No valueId
         'properties': <dynamic>[
-          {'name': 'key', 'description': "[<'mainColumn'>]"},
+          {'name': 'key', 'description': "[<'myColumn'>]"},
         ],
-        'children': <dynamic>[
-          {
-            'description': "Text-[<'orphanText'>]",
-            'widgetRuntimeType': 'Text',
-            // No valueId AND no renderObject — worst case
-            'properties': <dynamic>[
-              {'name': 'key', 'description': "[<'orphanText'>]"},
-            ],
-            'children': <dynamic>[],
-          },
-        ],
-      };
-
-      final widgets = <WidgetStyle>[];
-      _walkForTest(summaryTree, widgets, null);
-      expect(widgets[1].key, equals('orphanText'));
-      expect(widgets[1].bounds.width, equals(0));
-
-      // _collectValueIds only finds Column
-      final valueIdToIndices = <String, List<int>>{};
-      _collectValueIdsForTest(summaryTree, widgets, valueIdToIndices, 0);
-      expect(valueIdToIndices.length, equals(1));
-
-      // getDetailsSubtree(Column, subtreeDepth=5) returns children
-      final detailResponse = {
-        'description': 'Column',
-        'widgetRuntimeType': 'Column',
-        'renderObject': {
-          'description': 'RenderFlex ╌ size: Size(375.0, 400.0)',
-        },
         'children': <dynamic>[
           {
             'description': 'Text',
             'widgetRuntimeType': 'Text',
+            'valueId': 'inspector-1',
             'properties': <dynamic>[
-              {'name': 'key', 'description': "[<'orphanText'>]"},
+              {'name': 'key', 'description': "[<'myText'>]"},
             ],
-            'renderObject': {
-              'description':
-                  'RenderParagraph#x ╌ size: Size(200.0, 16.0)',
-            },
             'children': <dynamic>[],
           },
         ],
       };
 
-      // Build keyToIndex and extract child bounds
-      final keyToIndex = <String, int>{};
-      for (var i = 0; i < widgets.length; i++) {
-        final key = widgets[i].key;
-        if (key != null && widgets[i].bounds.width == 0) {
-          keyToIndex[key] = i;
-        }
-      }
+      final keyToValueId = <String, String>{};
+      _collectKeyValueIdsForTest(tree, keyToValueId);
 
-      _extractKeyedChildBoundsForTest(detailResponse, widgets, keyToIndex);
+      // Column has no valueId so it's skipped
+      expect(keyToValueId.containsKey('myColumn'), isFalse);
+      // Text has valueId
+      expect(keyToValueId['myText'], equals('inspector-1'));
+    });
 
-      expect(widgets[1].bounds.width, equals(200.0));
-      expect(widgets[1].bounds.height, equals(16.0));
+    test('skips nodes without a key', () {
+      final tree = {
+        'description': 'Container',
+        'widgetRuntimeType': 'Container',
+        'valueId': 'inspector-0',
+        // No key property
+        'children': <dynamic>[],
+      };
+
+      final keyToValueId = <String, String>{};
+      _collectKeyValueIdsForTest(tree, keyToValueId);
+
+      expect(keyToValueId, isEmpty);
     });
   });
 }
@@ -841,43 +596,6 @@ Map<String, dynamic> _sampleTree() => {
       ],
     };
 
-/// Create a WidgetStyle with zero bounds for testing.
-WidgetStyle _makeWidget({
-  required String key,
-  required String type,
-}) {
-  return WidgetStyle(
-    key: key,
-    widgetType: type,
-    bounds: const Bounds(x: 0, y: 0, width: 0, height: 0),
-    description: "$type(key: Key('$key'))",
-  );
-}
-
-/// Create a copy of a WidgetStyle with updated bounds.
-WidgetStyle _withBounds(WidgetStyle w, Bounds bounds) {
-  return WidgetStyle(
-    key: w.key,
-    widgetType: w.widgetType,
-    bounds: bounds,
-    backgroundColor: w.backgroundColor,
-    textColor: w.textColor,
-    fontSize: w.fontSize,
-    fontWeight: w.fontWeight,
-    fontFamily: w.fontFamily,
-    lineHeight: w.lineHeight,
-    letterSpacing: w.letterSpacing,
-    textContent: w.textContent,
-    padding: w.padding,
-    gap: w.gap,
-    cornerRadius: w.cornerRadius,
-    layoutDirection: w.layoutDirection,
-    childCount: w.childCount,
-    description: w.description,
-    parentKey: w.parentKey,
-  );
-}
-
 /// Replicate _extractBoundsFromDescription for testing.
 Bounds _extractBoundsFromDescriptionForTest(Map<String, dynamic> node) {
   final desc = node['description'] as String? ?? '';
@@ -894,46 +612,16 @@ Bounds _extractBoundsFromDescriptionForTest(Map<String, dynamic> node) {
   return const Bounds(x: 0, y: 0, width: 0, height: 0);
 }
 
-/// Replicate _extractBounds for testing (uses renderObject child).
-Bounds _extractBoundsForTest(Map<String, dynamic> node) {
-  final renderObject = node['renderObject'] as Map<String, dynamic>?;
-  if (renderObject == null) {
-    return const Bounds(x: 0, y: 0, width: 0, height: 0);
-  }
-  final desc = renderObject['description'] as String? ?? '';
-  final sizeMatch =
-      RegExp(r'size: Size\(([\d.]+),\s*([\d.]+)\)').firstMatch(desc);
-  if (sizeMatch != null) {
-    return Bounds(
-      x: 0,
-      y: 0,
-      width: double.parse(sizeMatch.group(1)!),
-      height: double.parse(sizeMatch.group(2)!),
-    );
-  }
-  return const Bounds(x: 0, y: 0, width: 0, height: 0);
-}
-
-/// Replicate _collectValueIds for testing.
-void _collectValueIdsForTest(
+/// Replicate _collectKeyValueIds for testing.
+void _collectKeyValueIdsForTest(
   Map<String, dynamic> node,
-  List<WidgetStyle> widgets,
-  Map<String, List<int>> valueIdToIndices,
-  int startIndex,
+  Map<String, String> keyToValueId,
 ) {
   final valueId = node['valueId'] as String?;
-
   if (valueId != null) {
-    final description = node['description'] as String? ?? '';
-    final widgetType = node['widgetRuntimeType'] as String? ?? description;
-
-    for (var i = startIndex; i < widgets.length; i++) {
-      if (widgets[i].widgetType == widgetType &&
-          widgets[i].bounds.width == 0 &&
-          widgets[i].bounds.height == 0) {
-        valueIdToIndices.putIfAbsent(valueId, () => []).add(i);
-        break;
-      }
+    final key = _extractKeyForTest(node);
+    if (key != null) {
+      keyToValueId[key] = valueId;
     }
   }
 
@@ -941,58 +629,34 @@ void _collectValueIdsForTest(
   if (children != null) {
     for (final child in children) {
       if (child is Map<String, dynamic>) {
-        _collectValueIdsForTest(child, widgets, valueIdToIndices, startIndex);
+        _collectKeyValueIdsForTest(child, keyToValueId);
       }
     }
   }
 }
 
-/// Replicate _extractKeyedChildBounds for testing.
-void _extractKeyedChildBoundsForTest(
-  Map<String, dynamic> node,
-  List<WidgetStyle> widgets,
-  Map<String, int> keyToIndex,
-) {
-  if (keyToIndex.isEmpty) return;
-
-  final children = node['children'] as List<dynamic>?;
-  if (children == null) return;
-
-  for (final child in children) {
-    if (child is! Map<String, dynamic>) continue;
-
-    final key = FlutterInspector.parseKeyDescription(
-      _extractKeyDescForBounds(child) ?? '',
-    );
-    if (key != null && keyToIndex.containsKey(key)) {
-      var bounds = _extractBoundsForTest(child);
-      if (bounds.width == 0 && bounds.height == 0) {
-        bounds = _extractBoundsFromDescriptionForTest(child);
-      }
-      if (bounds.width > 0 && bounds.height > 0) {
-        final idx = keyToIndex[key]!;
-        widgets[idx] = _withBounds(widgets[idx], bounds);
-        keyToIndex.remove(key);
-      }
-    }
-
-    _extractKeyedChildBoundsForTest(child, widgets, keyToIndex);
-  }
-}
-
-/// Extract key description from any source in a node (properties, description).
-String? _extractKeyDescForBounds(Map<String, dynamic> node) {
+/// Extract key from a node using all sources (properties, description, valueId).
+String? _extractKeyForTest(Map<String, dynamic> node) {
   // Check properties first
   final properties = node['properties'] as List<dynamic>?;
   if (properties != null) {
     for (final prop in properties) {
       if (prop is Map && prop['name'] == 'key') {
-        return prop['description'] as String?;
+        final keyDesc = prop['description'] as String?;
+        if (keyDesc != null) {
+          final extracted = FlutterInspector.parseKeyDescription(keyDesc);
+          if (extracted != null) return extracted;
+        }
       }
     }
   }
-  // Fallback: description field (e.g. "Text-[<'myKey'>]")
-  return node['description'] as String?;
+  // Fallback: description field
+  final description = node['description'] as String?;
+  if (description != null) {
+    final extracted = FlutterInspector.parseKeyDescription(description);
+    if (extracted != null) return extracted;
+  }
+  return null;
 }
 
 /// A realistic tree mimicking actual Flutter VM service output.

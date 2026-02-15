@@ -52,8 +52,15 @@ class WidgetComparator {
         .map((n) => n.name)
         .toList();
 
+    // Extra widgets: unmatched build widgets that are NOT framework
+    // internals. Framework widgets (ProviderScope, Navigator, Scaffold,
+    // MediaQuery, etc.) and keyless widgets are expected to exist in the
+    // Flutter tree without corresponding design nodes.
     final extra = widgets
-        .where((w) => !matchedWidgetIds.contains(w.identifier))
+        .where((w) =>
+            !matchedWidgetIds.contains(w.identifier) &&
+            !_isFrameworkWidget(w.widgetType) &&
+            w.key != null,)
         .map((w) => w.identifier)
         .toList();
 
