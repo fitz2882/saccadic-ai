@@ -824,21 +824,19 @@ class FlutterInspector {
 
   /// Fetch bounds via evaluate() using localToGlobal + scroll offset compensation.
   ///
-  /// Walks the Flutter element tree inside the running app, finds all widgets
-  /// with a ValueKey, and calls `RenderBox.localToGlobal(Offset.zero)` to
-  /// get screen coordinates. Then walks up the element tree to find any
-  /// `ScrollableState` ancestors and adds their `position.pixels` to get
-  /// **content-relative** positions:
+  /// Two critical fixes over naive localToGlobal:
   ///
-  ///   `contentY = screenY + scrollOffset`
+  /// 1. **Library selection**: `rootLib` (main.dart) often doesn't import
+  ///    Flutter types directly (`import 'app.dart'; void main() => runApp(...)`).
+  ///    We try multiple libraries until we find one with Flutter types in scope.
   ///
-  /// Without this compensation, widgets inside scrollables (ListView,
-  /// SingleChildScrollView, CustomScrollView) report screen-relative y
-  /// coordinates that change with scroll position, causing all y-position
-  /// comparisons to fail (~65% score cap).
+  /// 2. **String truncation**: VM service truncates `valueAsString` to ~128
+  ///    chars. With 100+ widgets, only 3-4 would get bounds. We detect
+  ///    truncation and fetch the full string via `getObject()`.
   ///
-  /// Handles nested scrollables (e.g., horizontal scroll inside vertical)
-  /// by checking `axisDirection` and applying offsets to the correct axis.
+  /// 3. **Scroll compensation**: For widgets inside scrollables, adds
+  ///    `ScrollableState.position.pixels` to get content-relative positions:
+  ///    `contentY = screenY + scrollOffset`.
   ///
   /// Returns the set of keys that were successfully resolved.
   Future<Set<String>> _fetchBoundsViaEvaluate(
@@ -848,58 +846,32 @@ class FlutterInspector {
     final resolved = <String>{};
     try {
       final isolate = await _service!.getIsolate(_isolateId!);
-      final rootLibId = isolate.rootLib?.id;
-      if (rootLibId == null) return resolved;
+      final libraries = isolate.libraries ?? [];
 
-      // Evaluate a Dart expression that walks the element tree and collects
-      // content-relative bounds for all ValueKey'd widgets in one call.
-      //
-      // For widgets inside scrollables (SingleChildScrollView, ListView, etc.),
-      // localToGlobal returns screen-relative positions which change with scroll.
-      // We compensate by finding the nearest ScrollableState ancestor and adding
-      // its scroll offset: contentY = screenY + scrollOffset.
-      const expression = '(() {'
-          'final r=<String>[];'
-          'void v(Element e){'
-          'final w=e.widget;'
-          'if(w.key is ValueKey){'
-          'final k=(w.key! as ValueKey).value.toString();'
-          'final ro=e.findRenderObject();'
-          'if(ro is RenderBox && ro.hasSize){'
-          'final p=ro.localToGlobal(Offset.zero);'
-          'var dy=p.dy;var dx=p.dx;'
-          // Walk up the element tree to find ScrollableState ancestors.
-          // Add each scroll offset to get content-relative position.
-          // Handles nested scrollables (e.g., horizontal scroll inside vertical).
-          'e.visitAncestorElements((a){'
-          'if(a is StatefulElement && a.state is ScrollableState){'
-          'final s=(a.state as ScrollableState);'
-          'final ax=s.axisDirection;'
-          'final px=s.position.pixels;'
-          'if(ax==AxisDirection.down||ax==AxisDirection.up)dy+=px;'
-          'else dx+=px;'
-          '}'
-          'return true;'
-          '});'
-          'r.add("\$k:\$dx,\$dy,\${ro.size.width},\${ro.size.height}");'
-          '}}'
-          'e.visitChildren(v);'
-          '}'
-          'WidgetsBinding.instance.rootElement!.visitChildren(v);'
-          'return r.join(";");'
-          '})()';
+      // Try libraries in order until evaluate succeeds.
+      // rootLib may not have Flutter types in scope.
+      final candidates = _buildEvaluateCandidates(isolate, libraries);
+      if (candidates.isEmpty) return resolved;
 
-      final result = await _service!.evaluate(
-        _isolateId!,
-        rootLibId,
-        expression,
-      );
+      // Try full expression (with scroll compensation) first, then simple
+      // localToGlobal if scroll types aren't available.
+      String? valueStr;
+      for (final libId in candidates) {
+        valueStr = await _tryEvaluateBounds(libId, _boundsWithScrollExpr);
+        if (valueStr != null) break;
+        valueStr = await _tryEvaluateBounds(libId, _boundsSimpleExpr);
+        if (valueStr != null) break;
+      }
+
+      if (valueStr == null || valueStr.isEmpty) {
+        stderr.writeln(
+          '[saccadic:diag] evaluate() failed against all '
+          '${candidates.length} candidate libraries.',
+        );
+        return resolved;
+      }
 
       // Parse the result string: "key1:x,y,w,h;key2:x,y,w,h;..."
-      final resultJson = result.json;
-      final valueStr = resultJson?['valueAsString'] as String?;
-      if (valueStr == null || valueStr.isEmpty) return resolved;
-
       for (final entry in valueStr.split(';')) {
         final colonIdx = entry.indexOf(':');
         if (colonIdx < 0) continue;
@@ -923,8 +895,8 @@ class FlutterInspector {
       }
 
       stderr.writeln(
-        '[saccadic:diag] evaluate() resolved ${resolved.length} keyed '
-        'widget bounds with absolute positions.',
+        '[saccadic:diag] evaluate() resolved ${resolved.length}/'
+        '${keyToIndex.length} keyed widget bounds.',
       );
     } catch (e) {
       stderr.writeln(
@@ -934,6 +906,182 @@ class FlutterInspector {
     }
     return resolved;
   }
+
+  /// Build ordered list of library IDs to try for evaluate().
+  ///
+  /// rootLib (main.dart) may not have Flutter types in scope if it
+  /// just does `import 'app.dart'; void main() => runApp(MyApp())`.
+  /// We try: rootLib → app libraries → Flutter framework libraries.
+  List<String> _buildEvaluateCandidates(
+    Isolate isolate,
+    List<LibraryRef> libraries,
+  ) {
+    final result = <String>[];
+    final seen = <String>{};
+
+    void add(String? id) {
+      if (id != null && seen.add(id)) result.add(id);
+    }
+
+    // 1. rootLib — works if main.dart imports Flutter directly
+    add(isolate.rootLib?.id);
+
+    // 2. App libraries — almost always import package:flutter/material.dart
+    for (final lib in libraries) {
+      final uri = lib.uri ?? '';
+      if (uri.startsWith('dart:') || uri.startsWith('package:flutter/')) {
+        continue;
+      }
+      if (uri.startsWith('package:')) {
+        add(lib.id);
+        if (result.length >= 5) break; // Don't try too many
+      }
+    }
+
+    // 3. Flutter framework libraries — guaranteed to have widget types.
+    //    scrollable.dart has ScrollableState + all widget types (via imports).
+    //    framework.dart has Element, Widget, State, etc.
+    //    binding.dart has WidgetsBinding.
+    for (final lib in libraries) {
+      final uri = lib.uri ?? '';
+      if (uri == 'package:flutter/src/widgets/scrollable.dart' ||
+          uri == 'package:flutter/src/widgets/binding.dart' ||
+          uri == 'package:flutter/src/widgets/framework.dart') {
+        add(lib.id);
+      }
+    }
+
+    return result;
+  }
+
+  /// Try evaluating a bounds expression against a specific library.
+  ///
+  /// Returns the full result string, or null if the expression failed.
+  /// Handles VM service string truncation by fetching the full value
+  /// via `getObject()` when `valueIsTruncated` is true.
+  Future<String?> _tryEvaluateBounds(String libId, String expression) async {
+    try {
+      final result = await _service!.evaluate(
+        _isolateId!,
+        libId,
+        expression,
+      );
+
+      final json = result.json;
+      if (json == null) return null;
+
+      // Check for compile/runtime errors
+      final kind = json['type'] as String? ?? '';
+      if (kind.contains('Error') || kind.contains('Sentinel')) {
+        final msg = json['message'] as String? ?? 'unknown error';
+        final preview = msg.length > 200 ? msg.substring(0, 200) : msg;
+        stderr.writeln('[saccadic:diag] evaluate error ($libId): $preview');
+        return null;
+      }
+
+      var value = json['valueAsString'] as String?;
+      final truncated = json['valueIsTruncated'] as bool? ?? false;
+
+      // VM service truncates valueAsString to ~128 chars by default.
+      // For 100+ widgets, the result is ~4000+ chars. We must fetch
+      // the full string via getObject() or all but 3-4 widgets lose
+      // their bounds.
+      if (truncated) {
+        final objId = json['id'] as String?;
+        if (objId != null) {
+          try {
+            final fullObj = await _service!.getObject(
+              _isolateId!,
+              objId,
+            );
+            final fullValue =
+                fullObj.json?['valueAsString'] as String?;
+            if (fullValue != null) {
+              stderr.writeln(
+                '[saccadic:diag] Fetched full string: '
+                '${fullValue.length} chars (was truncated to '
+                '${value?.length ?? 0}).',
+              );
+              value = fullValue;
+            }
+          } catch (e) {
+            stderr.writeln(
+              '[saccadic:diag] getObject for full string failed: $e. '
+              'Using truncated value (${value?.length ?? 0} chars).',
+            );
+          }
+        }
+      }
+
+      if (value != null && value.isNotEmpty) {
+        stderr.writeln(
+          '[saccadic:diag] evaluate succeeded against $libId '
+          '(${value.length} chars).',
+        );
+      }
+
+      return value;
+    } catch (e) {
+      stderr.writeln('[saccadic:diag] evaluate threw ($libId): $e');
+      return null;
+    }
+  }
+
+  /// Bounds expression WITH scroll offset compensation.
+  ///
+  /// Requires ScrollableState, StatefulElement, AxisDirection in scope.
+  /// Works with any library that imports package:flutter/widgets.dart
+  /// or package:flutter/material.dart.
+  static const _boundsWithScrollExpr = '(() {'
+      'final r=<String>[];'
+      'void v(Element e){'
+      'final w=e.widget;'
+      'if(w.key is ValueKey){'
+      'final k=(w.key! as ValueKey).value.toString();'
+      'final ro=e.findRenderObject();'
+      'if(ro is RenderBox && ro.hasSize){'
+      'final p=ro.localToGlobal(Offset.zero);'
+      'var dy=p.dy;var dx=p.dx;'
+      'e.visitAncestorElements((a){'
+      'if(a is StatefulElement && a.state is ScrollableState){'
+      'final s=(a.state as ScrollableState);'
+      'final ax=s.axisDirection;'
+      'final px=s.position.pixels;'
+      'if(ax==AxisDirection.down||ax==AxisDirection.up)dy+=px;'
+      'else dx+=px;'
+      '}'
+      'return true;'
+      '});'
+      'r.add("\$k:\$dx,\$dy,\${ro.size.width},\${ro.size.height}");'
+      '}}'
+      'e.visitChildren(v);'
+      '}'
+      'WidgetsBinding.instance.rootElement!.visitChildren(v);'
+      'return r.join(";");'
+      '})()';
+
+  /// Bounds expression WITHOUT scroll compensation — simpler fallback.
+  ///
+  /// Uses only basic types (Element, RenderBox, ValueKey, Offset) that
+  /// are available in any Flutter library. Falls back to this if the
+  /// scroll-compensated expression fails due to missing types.
+  static const _boundsSimpleExpr = '(() {'
+      'final r=<String>[];'
+      'void v(Element e){'
+      'final w=e.widget;'
+      'if(w.key is ValueKey){'
+      'final k=(w.key! as ValueKey).value.toString();'
+      'final ro=e.findRenderObject();'
+      'if(ro is RenderBox && ro.hasSize){'
+      'final p=ro.localToGlobal(Offset.zero);'
+      'r.add("\$k:\${p.dx},\${p.dy},\${ro.size.width},\${ro.size.height}");'
+      '}}'
+      'e.visitChildren(v);'
+      '}'
+      'WidgetsBinding.instance.rootElement!.visitChildren(v);'
+      'return r.join(";");'
+      '})()';
+
 
   /// Fallback: fetch bounds via getLayoutExplorerNode.
   ///
