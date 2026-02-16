@@ -822,12 +822,23 @@ class FlutterInspector {
     }
   }
 
-  /// Fetch bounds via evaluate() using localToGlobal for absolute positions.
+  /// Fetch bounds via evaluate() using localToGlobal + scroll offset compensation.
   ///
   /// Walks the Flutter element tree inside the running app, finds all widgets
   /// with a ValueKey, and calls `RenderBox.localToGlobal(Offset.zero)` to
-  /// get absolute screen coordinates. This correctly handles scrollable
-  /// content where layout-relative offsets would report y=0.
+  /// get screen coordinates. Then walks up the element tree to find any
+  /// `ScrollableState` ancestors and adds their `position.pixels` to get
+  /// **content-relative** positions:
+  ///
+  ///   `contentY = screenY + scrollOffset`
+  ///
+  /// Without this compensation, widgets inside scrollables (ListView,
+  /// SingleChildScrollView, CustomScrollView) report screen-relative y
+  /// coordinates that change with scroll position, causing all y-position
+  /// comparisons to fail (~65% score cap).
+  ///
+  /// Handles nested scrollables (e.g., horizontal scroll inside vertical)
+  /// by checking `axisDirection` and applying offsets to the correct axis.
   ///
   /// Returns the set of keys that were successfully resolved.
   Future<Set<String>> _fetchBoundsViaEvaluate(
@@ -841,7 +852,12 @@ class FlutterInspector {
       if (rootLibId == null) return resolved;
 
       // Evaluate a Dart expression that walks the element tree and collects
-      // absolute bounds for all ValueKey'd widgets in one call.
+      // content-relative bounds for all ValueKey'd widgets in one call.
+      //
+      // For widgets inside scrollables (SingleChildScrollView, ListView, etc.),
+      // localToGlobal returns screen-relative positions which change with scroll.
+      // We compensate by finding the nearest ScrollableState ancestor and adding
+      // its scroll offset: contentY = screenY + scrollOffset.
       const expression = '(() {'
           'final r=<String>[];'
           'void v(Element e){'
@@ -851,7 +867,21 @@ class FlutterInspector {
           'final ro=e.findRenderObject();'
           'if(ro is RenderBox && ro.hasSize){'
           'final p=ro.localToGlobal(Offset.zero);'
-          'r.add("\$k:\${p.dx},\${p.dy},\${ro.size.width},\${ro.size.height}");'
+          'var dy=p.dy;var dx=p.dx;'
+          // Walk up the element tree to find ScrollableState ancestors.
+          // Add each scroll offset to get content-relative position.
+          // Handles nested scrollables (e.g., horizontal scroll inside vertical).
+          'e.visitAncestorElements((a){'
+          'if(a is StatefulElement && a.state is ScrollableState){'
+          'final s=(a.state as ScrollableState);'
+          'final ax=s.axisDirection;'
+          'final px=s.position.pixels;'
+          'if(ax==AxisDirection.down||ax==AxisDirection.up)dy+=px;'
+          'else dx+=px;'
+          '}'
+          'return true;'
+          '});'
+          'r.add("\$k:\$dx,\$dy,\${ro.size.width},\${ro.size.height}");'
           '}}'
           'e.visitChildren(v);'
           '}'
