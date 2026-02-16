@@ -62,17 +62,6 @@ class FlutterInspectionResult {
   });
 }
 
-/// Info about a navigation bar found in the widget tree.
-class NavBarInfo {
-  /// The widget type (e.g., 'BottomNavigationBar', 'NavigationBar').
-  final String type;
-
-  /// The number of tab items detected.
-  final int tabCount;
-
-  const NavBarInfo({required this.type, required this.tabCount});
-}
-
 /// Connects to a running Flutter app's VM service.
 class FlutterInspector {
   VmService? _service;
@@ -342,202 +331,155 @@ class FlutterInspector {
     return const Viewport(width: 1280, height: 800);
   }
 
-  /// Navigate to a specific tab in the app's bottom navigation bar.
+  /// Navigate to a route in the running Flutter app.
   ///
-  /// Finds `BottomNavigationBar`, `NavigationBar`, or `CupertinoTabBar` in
-  /// the widget tree, computes the center position of the target tab, and
-  /// dispatches pointer events via VM service `evaluate()` to simulate a tap.
+  /// Uses VM service `evaluate()` to call navigation methods inside the
+  /// running app. Tries three strategies in order:
   ///
-  /// Parameters:
-  /// - [tabIndex]: zero-based index of the tab to navigate to
-  /// - [tabCount]: total number of tabs (auto-detected from widget tree if omitted)
-  /// - [viewportWidth]: logical width of the app viewport (default: 375)
-  /// - [viewportHeight]: logical height of the app viewport (default: 812)
+  /// 1. **GoRouter**: Find a library that imports `go_router`, evaluate an
+  ///    expression that walks the element tree to find a context with
+  ///    GoRouter as an InheritedWidget, then calls `.go(route)`.
+  /// 2. **Navigator**: Use any Flutter library to call
+  ///    `Navigator.of(context).pushNamed(route)`.
+  /// 3. Returns false if neither works.
+  ///
+  /// This approach works with any navigation setup — GoRouter, Navigator 2.0,
+  /// custom tab bars — because it operates at the route level, not UI tap
+  /// simulation.
   ///
   /// Returns true if navigation succeeded.
-  Future<bool> navigateToTab(
-    int tabIndex, {
-    int? tabCount,
-    double viewportWidth = 375,
-    double viewportHeight = 812,
-  }) async {
+  Future<bool> navigateToRoute(String route) async {
     _ensureConnected();
 
     try {
-      // Fetch the widget tree to find the navigation bar
-      final rootNode = await _fetchRootWidgetNode();
-      if (rootNode == null) {
+      final isolate = await _service!.getIsolate(_isolateId!);
+      final libraries = isolate.libraries ?? [];
+
+      // Strategy 1: GoRouter — find a library that imports go_router
+      final goRouterLib = _findLibraryContaining(libraries, 'go_router');
+      if (goRouterLib != null) {
         stderr.writeln(
-          '[saccadic] Cannot get widget tree for tab navigation.',
+          '[saccadic] Found GoRouter library: ${goRouterLib.uri}',
         );
-        return false;
+        final result = await _navigateViaGoRouter(goRouterLib.id!, route);
+        if (result) {
+          await Future<void>.delayed(const Duration(milliseconds: 500));
+          stderr.writeln('[saccadic] Navigated to "$route" via GoRouter.');
+          return true;
+        }
       }
 
-      // Find the nav bar and detect tab count
-      final navInfo = _findNavBarInfoImpl(rootNode);
-      final effectiveTabCount = tabCount ?? navInfo?.tabCount;
-
-      if (effectiveTabCount == null || effectiveTabCount < 2) {
+      // Strategy 2: Navigator.pushNamed — find any Flutter library
+      final flutterLib = _findLibraryContaining(libraries, 'flutter');
+      if (flutterLib != null) {
         stderr.writeln(
-          '[saccadic] Could not determine tab count. '
-          '${navInfo == null ? "No navigation bar found in widget tree." : "Found ${navInfo.type} but could not count tabs."} '
-          'Pass tabCount parameter explicitly.',
+          '[saccadic] Trying Navigator.pushNamed via ${flutterLib.uri}',
         );
-        return false;
+        final result = await _navigateViaPushNamed(flutterLib.id!, route);
+        if (result) {
+          await Future<void>.delayed(const Duration(milliseconds: 500));
+          stderr.writeln(
+            '[saccadic] Navigated to "$route" via Navigator.pushNamed.',
+          );
+          return true;
+        }
       }
-
-      if (tabIndex < 0 || tabIndex >= effectiveTabCount) {
-        stderr.writeln(
-          '[saccadic] Tab index $tabIndex out of range '
-          '(0-${effectiveTabCount - 1}).',
-        );
-        return false;
-      }
-
-      // Nav bar height: NavigationBar (M3) is ~80px, BottomNavigationBar ~56px
-      final navBarHeight =
-          navInfo?.type == 'NavigationBar' ? 80.0 : 56.0;
-
-      // Compute tap position: center of the target tab
-      final tabWidth = viewportWidth / effectiveTabCount;
-      final tapX = (tabIndex * tabWidth) + (tabWidth / 2);
-      final tapY = viewportHeight - (navBarHeight / 2);
 
       stderr.writeln(
-        '[saccadic] Tapping tab $tabIndex at ($tapX, $tapY) '
-        '— ${navInfo?.type ?? "unknown"} with $effectiveTabCount tabs.',
+        '[saccadic] All navigation strategies failed for "$route".',
       );
-
-      final tapped = await _dispatchTap(tapX, tapY);
-      if (tapped) {
-        // Wait for navigation animation to complete
-        await Future<void>.delayed(const Duration(milliseconds: 500));
-        stderr.writeln('[saccadic] Navigated to tab $tabIndex.');
-      }
-      return tapped;
+      return false;
     } catch (e) {
-      stderr.writeln('[saccadic] Tab navigation failed: $e');
+      stderr.writeln('[saccadic] Route navigation failed: $e');
       return false;
     }
   }
 
-  /// Fetch the raw root widget tree node from the VM service.
-  Future<Map<String, dynamic>?> _fetchRootWidgetNode() async {
-    try {
-      final response = await _service!.callServiceExtension(
-        'ext.flutter.inspector.getRootWidgetTree',
-        isolateId: _isolateId,
-        args: {
-          'objectGroup': 'saccadic-nav',
-          'isSummaryTree': 'true',
-        },
-      );
-      return _parseTreeResponse(response);
-    } catch (_) {
-      // Fallback to summary tree
-    }
+  /// Find a library in the isolate whose URI contains [pattern].
+  ///
+  /// Prefers app-specific libraries (not package: or dart:) when multiple
+  /// match, since the app's own routing file is most likely to have the
+  /// right imports in scope.
+  LibraryRef? _findLibraryContaining(
+    List<LibraryRef> libraries,
+    String pattern,
+  ) {
+    LibraryRef? packageMatch;
+    for (final lib in libraries) {
+      final uri = lib.uri ?? '';
+      if (!uri.contains(pattern)) continue;
 
-    try {
-      final response = await _service!.callServiceExtension(
-        'ext.flutter.inspector.getRootWidgetSummaryTree',
-        isolateId: _isolateId,
-        args: {'objectGroup': 'saccadic-nav'},
-      );
-      return _parseTreeResponse(response);
-    } catch (_) {
-      return null;
+      // Prefer app-internal libraries (package:my_app/...) over
+      // framework libraries (package:go_router/...)
+      if (!uri.startsWith('dart:')) {
+        if (!uri.startsWith('package:$pattern')) {
+          // This is an app library that imports the pattern — best match
+          return lib;
+        }
+        packageMatch ??= lib;
+      }
     }
+    return packageMatch;
   }
 
-  /// Find a navigation bar in the widget tree and count its tabs.
+  /// Navigate using GoRouter.of(context).go(route).
   ///
-  /// Searches for `BottomNavigationBar`, `NavigationBar`, or
-  /// `CupertinoTabBar` and counts child tab items.
-  ///
-  /// Exposed as static for testability — does not require a VM connection.
-  static NavBarInfo? findNavBarInfo(Map<String, dynamic> node) =>
-      _findNavBarInfoImpl(node);
+  /// The expression walks the element tree to find a context that has
+  /// GoRouter available as an InheritedWidget (since the root element
+  /// doesn't have it in scope), then calls `.go(route)`.
+  Future<bool> _navigateViaGoRouter(String libraryId, String route) async {
+    // Single-line expression — no imports needed because we evaluate
+    // against a library that already imports GoRouter.
+    final expression = '(() {'
+        'GoRouter? r;'
+        'void v(Element e){'
+        'try{r??=GoRouter.of(e);}catch(_){}'
+        'if(r==null)e.visitChildren(v);'
+        '}'
+        'WidgetsBinding.instance.rootElement!.visitChildren(v);'
+        "r?.go('$route');"
+        "return r!=null?'navigated':'not found';"
+        '})()';
 
-  static NavBarInfo? _findNavBarInfoImpl(Map<String, dynamic> node) {
-    final widgetType = node['widgetRuntimeType'] as String? ??
-        node['description'] as String? ??
-        '';
-
-    // Check for navigation bar widget types
-    const navBarTypes = {
-      'BottomNavigationBar',
-      'NavigationBar',
-      'CupertinoTabBar',
-    };
-
-    if (navBarTypes.contains(widgetType)) {
-      final children = node['children'] as List<dynamic>? ?? [];
-
-      // Count recognized tab item types
-      var tabCount = 0;
-      for (final child in children) {
-        if (child is! Map<String, dynamic>) continue;
-        final childType = child['widgetRuntimeType'] as String? ??
-            child['description'] as String? ??
-            '';
-        if (childType.contains('NavigationDestination') ||
-            childType.contains('BottomNavigationBarItem') ||
-            childType.contains('NavigationBarItem') ||
-            childType.contains('TabBarItem')) {
-          tabCount++;
-        }
-      }
-
-      // Fallback: count all direct children if no recognized types found
-      if (tabCount == 0 && children.isNotEmpty) {
-        tabCount = children.length;
-      }
-
-      return NavBarInfo(type: widgetType, tabCount: tabCount);
-    }
-
-    // Recurse into children
-    final children = node['children'] as List<dynamic>?;
-    if (children != null) {
-      for (final child in children) {
-        if (child is Map<String, dynamic>) {
-          final result = _findNavBarInfoImpl(child);
-          if (result != null) return result;
-        }
-      }
-    }
-
-    return null;
-  }
-
-  /// Dispatch a tap at screen position (x, y) using VM service evaluate.
-  ///
-  /// Evaluates a Dart expression in the app's root library to dispatch
-  /// `PointerDownEvent` + `PointerUpEvent` through the gesture binding.
-  Future<bool> _dispatchTap(double x, double y) async {
     try {
-      final isolate = await _service!.getIsolate(_isolateId!);
-      final rootLibId = isolate.rootLib?.id;
-      if (rootLibId == null) {
-        stderr.writeln('[saccadic] Cannot find root library for evaluate.');
-        return false;
-      }
+      final result = await _service!.evaluate(
+        _isolateId!,
+        libraryId,
+        expression,
+      );
 
-      // Use GestureBinding.instance which has handlePointerEvent.
-      // These types are available in any library that imports
-      // package:flutter/material.dart (which re-exports gestures.dart).
-      final expression = '(() { '
-          'GestureBinding.instance!.handlePointerEvent('
-          'PointerDownEvent(position: Offset($x, $y), pointer: 99)); '
-          'GestureBinding.instance!.handlePointerEvent('
-          'PointerUpEvent(position: Offset($x, $y), pointer: 99)); '
-          'return "ok"; '
-          '})()';
-
-      await _service!.evaluate(_isolateId!, rootLibId, expression);
-      return true;
+      final value = result.json?['valueAsString'] as String?;
+      return value == 'navigated';
     } catch (e) {
-      stderr.writeln('[saccadic] Tap dispatch via evaluate failed: $e');
+      stderr.writeln('[saccadic] GoRouter evaluate failed: $e');
+      return false;
+    }
+  }
+
+  /// Navigate using Navigator.of(context).pushNamed(route).
+  Future<bool> _navigateViaPushNamed(String libraryId, String route) async {
+    final expression = '(() {'
+        'NavigatorState? n;'
+        'void v(Element e){'
+        'try{n??=Navigator.of(e);}catch(_){}'
+        'if(n==null)e.visitChildren(v);'
+        '}'
+        'WidgetsBinding.instance.rootElement!.visitChildren(v);'
+        "n?.pushNamed('$route');"
+        "return n!=null?'navigated':'not found';"
+        '})()';
+
+    try {
+      final result = await _service!.evaluate(
+        _isolateId!,
+        libraryId,
+        expression,
+      );
+
+      final value = result.json?['valueAsString'] as String?;
+      return value == 'navigated';
+    } catch (e) {
+      stderr.writeln('[saccadic] Navigator.pushNamed evaluate failed: $e');
       return false;
     }
   }
@@ -806,13 +748,14 @@ class FlutterInspector {
     return const Bounds(x: 0, y: 0, width: 0, height: 0);
   }
 
-  /// Fetch render bounds for keyed widgets via getLayoutExplorerNode.
+  /// Fetch render bounds for keyed widgets.
   ///
-  /// The summary tree includes `valueId` on all widgets (including leaf
-  /// widgets like Text, Icon, Container). We use `getLayoutExplorerNode`
-  /// instead of `getDetailsSubtree` because it returns structured layout
-  /// data (`size`, `parentData`) even on Flutter Web where
-  /// `getDetailsSubtree` omits `renderObject` data.
+  /// Uses two strategies:
+  /// 1. **Primary**: `evaluate()` with `localToGlobal(Offset.zero)` to get
+  ///    absolute screen coordinates. Works correctly with scrollable content
+  ///    (ListView, CustomScrollView, SingleChildScrollView).
+  /// 2. **Fallback**: `getLayoutExplorerNode` for widgets not resolved by
+  ///    the primary method (e.g., if evaluate is unavailable).
   Future<void> _fetchRenderBounds(
     Map<String, dynamic> rootNode,
     List<WidgetStyle> widgets,
@@ -830,18 +773,152 @@ class FlutterInspector {
 
     if (keyToIndex.isEmpty) return;
 
-    // Walk the summary tree to map design keys → valueIds directly.
+    // Primary: evaluate() with localToGlobal for absolute positions.
+    // This correctly handles widgets inside ScrollView, ListView, etc.
+    final resolvedViaEvaluate =
+        await _fetchBoundsViaEvaluate(widgets, keyToIndex);
+
+    // Rebuild keyToIndex for widgets still needing bounds
+    final remainingKeys = <String, int>{};
+    for (final entry in keyToIndex.entries) {
+      if (!resolvedViaEvaluate.contains(entry.key)) {
+        remainingKeys[entry.key] = entry.value;
+      }
+    }
+
+    if (remainingKeys.isEmpty) {
+      stderr.writeln(
+        '[saccadic:diag] All ${keyToIndex.length} keyed widgets resolved '
+        'via evaluate (absolute positions).',
+      );
+      return;
+    }
+
+    stderr.writeln(
+      '[saccadic:diag] ${resolvedViaEvaluate.length}/${keyToIndex.length} '
+      'resolved via evaluate. Falling back to getLayoutExplorerNode for '
+      '${remainingKeys.length} remaining.',
+    );
+
+    // Fallback: getLayoutExplorerNode (layout-relative positions)
+    await _fetchBoundsViaLayoutExplorer(rootNode, widgets, remainingKeys);
+
+    // Summary: how many keyed widgets still have zero bounds?
+    final stillZero = widgets
+        .where((w) =>
+            w.key != null && w.bounds.width == 0 && w.bounds.height == 0,)
+        .toList();
+    if (stillZero.isNotEmpty) {
+      stderr.writeln(
+        '[saccadic:diag] After _fetchRenderBounds: ${stillZero.length} '
+        'keyed widgets still have 0-bounds: '
+        '${stillZero.take(10).map((w) => '"${w.key}" (${w.widgetType})').join(', ')}'
+        '${stillZero.length > 10 ? '...' : ''}',
+      );
+    } else {
+      stderr.writeln(
+        '[saccadic:diag] All keyed widgets have non-zero bounds.',
+      );
+    }
+  }
+
+  /// Fetch bounds via evaluate() using localToGlobal for absolute positions.
+  ///
+  /// Walks the Flutter element tree inside the running app, finds all widgets
+  /// with a ValueKey, and calls `RenderBox.localToGlobal(Offset.zero)` to
+  /// get absolute screen coordinates. This correctly handles scrollable
+  /// content where layout-relative offsets would report y=0.
+  ///
+  /// Returns the set of keys that were successfully resolved.
+  Future<Set<String>> _fetchBoundsViaEvaluate(
+    List<WidgetStyle> widgets,
+    Map<String, int> keyToIndex,
+  ) async {
+    final resolved = <String>{};
+    try {
+      final isolate = await _service!.getIsolate(_isolateId!);
+      final rootLibId = isolate.rootLib?.id;
+      if (rootLibId == null) return resolved;
+
+      // Evaluate a Dart expression that walks the element tree and collects
+      // absolute bounds for all ValueKey'd widgets in one call.
+      const expression = '(() {'
+          'final r=<String>[];'
+          'void v(Element e){'
+          'final w=e.widget;'
+          'if(w.key is ValueKey){'
+          'final k=(w.key! as ValueKey).value.toString();'
+          'final ro=e.findRenderObject();'
+          'if(ro is RenderBox && ro.hasSize){'
+          'final p=ro.localToGlobal(Offset.zero);'
+          'r.add("\$k:\${p.dx},\${p.dy},\${ro.size.width},\${ro.size.height}");'
+          '}}'
+          'e.visitChildren(v);'
+          '}'
+          'WidgetsBinding.instance.rootElement!.visitChildren(v);'
+          'return r.join(";");'
+          '})()';
+
+      final result = await _service!.evaluate(
+        _isolateId!,
+        rootLibId,
+        expression,
+      );
+
+      // Parse the result string: "key1:x,y,w,h;key2:x,y,w,h;..."
+      final resultJson = result.json;
+      final valueStr = resultJson?['valueAsString'] as String?;
+      if (valueStr == null || valueStr.isEmpty) return resolved;
+
+      for (final entry in valueStr.split(';')) {
+        final colonIdx = entry.indexOf(':');
+        if (colonIdx < 0) continue;
+
+        final key = entry.substring(0, colonIdx);
+        final parts = entry.substring(colonIdx + 1).split(',');
+        if (parts.length != 4) continue;
+
+        final idx = keyToIndex[key];
+        if (idx == null) continue;
+
+        final x = double.tryParse(parts[0]) ?? 0;
+        final y = double.tryParse(parts[1]) ?? 0;
+        final w = double.tryParse(parts[2]) ?? 0;
+        final h = double.tryParse(parts[3]) ?? 0;
+
+        if (w > 0 || h > 0) {
+          _updateWidgetBounds(widgets, idx, Bounds(x: x, y: y, width: w, height: h));
+          resolved.add(key);
+        }
+      }
+
+      stderr.writeln(
+        '[saccadic:diag] evaluate() resolved ${resolved.length} keyed '
+        'widget bounds with absolute positions.',
+      );
+    } catch (e) {
+      stderr.writeln(
+        '[saccadic:diag] evaluate() bounds fetch failed: $e. '
+        'Falling back to getLayoutExplorerNode.',
+      );
+    }
+    return resolved;
+  }
+
+  /// Fallback: fetch bounds via getLayoutExplorerNode.
+  ///
+  /// Returns layout-relative positions (parentData offsets). Less accurate
+  /// for scrollable content but works when evaluate() is unavailable.
+  Future<void> _fetchBoundsViaLayoutExplorer(
+    Map<String, dynamic> rootNode,
+    List<WidgetStyle> widgets,
+    Map<String, int> keyToIndex,
+  ) async {
     final keyToValueId = <String, String>{};
     _collectKeyValueIds(rootNode, keyToValueId);
 
-    stderr.writeln(
-      '[saccadic:diag] _fetchRenderBounds: ${keyToValueId.length} '
-      'key→valueId mappings found, ${keyToIndex.length} keyed widgets need bounds.',
-    );
-
     if (keyToValueId.isEmpty) return;
 
-    // Batch fetch layout data using getLayoutExplorerNode.
     const batchSize = 20;
     final entriesToFetch = <MapEntry<String, String>>[];
     for (final key in keyToIndex.keys) {
@@ -850,11 +927,6 @@ class FlutterInspector {
         entriesToFetch.add(MapEntry(key, valueId));
       }
     }
-
-    stderr.writeln(
-      '[saccadic:diag] Fetching layout for ${entriesToFetch.length} '
-      'keyed widgets via getLayoutExplorerNode.',
-    );
 
     for (var i = 0; i < entriesToFetch.length; i += batchSize) {
       final batch = entriesToFetch.skip(i).take(batchSize);
@@ -891,23 +963,6 @@ class FlutterInspector {
       });
 
       await Future.wait(futures);
-    }
-
-    // Summary: how many keyed widgets still have zero bounds?
-    final stillZero = widgets
-        .where((w) => w.key != null && w.bounds.width == 0 && w.bounds.height == 0)
-        .toList();
-    if (stillZero.isNotEmpty) {
-      stderr.writeln(
-        '[saccadic:diag] After _fetchRenderBounds: ${stillZero.length} '
-        'keyed widgets still have 0-bounds: '
-        '${stillZero.take(10).map((w) => '"${w.key}" (${w.widgetType})').join(', ')}'
-        '${stillZero.length > 10 ? '...' : ''}',
-      );
-    } else {
-      stderr.writeln(
-        '[saccadic:diag] All keyed widgets have non-zero bounds.',
-      );
     }
   }
 

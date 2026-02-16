@@ -133,9 +133,10 @@ class AgentPromptBuilder {
       buf.writeln('Capture a reference screenshot first via Pencil MCP `get_screenshot`');
       buf.writeln('and pass it as `referenceImage` for pixel-accurate comparison.');
       buf.writeln();
-      buf.writeln('**Tab navigation**: If this page is behind a BottomNavigationBar, '
-          'pass `tabIndex` (zero-based) so saccadic taps the correct tab '
-          'before comparing. Also pass `tabCount` if auto-detection fails.');
+      buf.writeln('**Route navigation**: If this page is behind a tab bar or '
+          'navigation system, pass `route` (e.g., "/learn", "/scenarios") '
+          'so saccadic navigates to the correct page before comparing. '
+          'Works with GoRouter, Navigator 2.0, and custom routing.');
       buf.writeln();
       buf.writeln('**Hot reload**: Save code changes before calling refine_build. '
           'Saccadic automatically hot reloads the Flutter app on iteration 2+. '

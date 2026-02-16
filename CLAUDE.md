@@ -77,20 +77,20 @@ get_screenshot({ pencilFile: "design.pen", nodeId: "frameId" })
 
 Then pass it to refine_build as `referenceImage`. Without this, saccadic generates an approximation from the design state which is less accurate.
 
-### Tab Navigation
+### Route Navigation
 
-For apps with a `BottomNavigationBar` or `NavigationBar`, saccadic can automatically switch tabs before comparing. Pass `tabIndex` (zero-based) to `refine_build`:
+For apps with tabs or multiple pages, pass `route` to `refine_build` so saccadic navigates to the correct page before comparing:
 
 ```json
 {
   "designSource": { "pencilFile": "design.pen", "pencilFrame": "Learn" },
   "flutterUrl": "ws://127.0.0.1:PORT/ws",
-  "tabIndex": 0,
+  "route": "/learn",
   "iteration": 1
 }
 ```
 
-Saccadic finds the navigation bar in the widget tree, computes the tab position, and dispatches a tap via the VM service. Pass `tabCount` if auto-detection fails.
+Saccadic uses VM service `evaluate()` to call `GoRouter.of(context).go(route)` inside the running app. It finds a library that imports `go_router`, walks the element tree to find a context with GoRouter as an InheritedWidget, then calls `.go(route)`. Falls back to `Navigator.of(context).pushNamed(route)` if GoRouter is not available.
 
 ### Hot Reload
 
@@ -118,7 +118,7 @@ The `plan_build` orchestration prompt includes these instructions automatically.
 
 ```bash
 cd saccadic
-dart test          # Run all tests (114 tests)
+dart test          # Run all tests (110 tests)
 dart analyze       # 0 issues expected
 dart compile exe bin/saccadic_mcp.dart -o saccadic-mcp  # Build MCP server
 ```
